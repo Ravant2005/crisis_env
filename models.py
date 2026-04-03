@@ -77,6 +77,9 @@ class ThreatInfo(BaseModel):
     casualties:         int               = Field(default=0,  description="Casualties incurred after impact")
     casualties_prevented: int             = Field(default=0,  description="Casualties prevented by timely response")
     population_evacuated: int             = Field(default=0,  description="Population evacuated before impact")
+    priority_score:     float             = Field(default=0.0, description="Computed: severity * population / max(TTI, 1)")
+    risk_level:         str               = Field(default="low", description="Computed: high/medium/low based on priority_score")
+    recommended_action_hint: str          = Field(default="classify_and_monitor", description="Computed action recommendation")
 
 
 class ResourceInfo(BaseModel):
@@ -190,6 +193,7 @@ class CrisisState(BaseModel):
     step_count:           int   = Field(default=0)
     total_steps:          int   = Field(default=50)
     episode_id:           str   = Field(default="")
+    difficulty:           str   = Field(default="medium", description="Difficulty level set for this episode")
 
     # Task-level scores (0.0–1.0)
     classification_score: float = Field(default=0.0, ge=0.0, le=1.0)

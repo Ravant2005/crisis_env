@@ -107,11 +107,14 @@ class CrisisEnvironment:
         self._casualties:            int   = 0
         self._casualties_prevented:  int   = 0
         self._total_population:      int   = 0
+        self._difficulty:           str = "medium"
+        self._cascade_threshold:     float = 0.6
 
         # Per-task grading accumulators
         # Classification
-        self._classify_attempts:  int   = 0
-        self._classify_correct:   int   = 0
+        self._classify_attempts:    int   = 0
+        self._classify_full_correct: int   = 0  # type + severity both correct
+        self._classify_partial_correct: int = 0  # only type correct
 
         # Prediction
         self._predict_attempts:   int   = 0
@@ -134,15 +137,31 @@ class CrisisEnvironment:
     # PUBLIC API
     # ─────────────────────────────────────────
 
-    def reset(self) -> CrisisObservation:
+    def reset(self, seed: Optional[int] = None, difficulty: str = "medium", **kwargs) -> CrisisObservation:
         """
         Reset the environment to a fresh randomised scenario.
         Returns the initial observation.
+        
+        Args:
+            seed: Optional seed for reproducibility (default 42 if None)
+            difficulty: "easy", "medium", or "hard" - controls number of threats and cascade probability
         """
-        # Re-seed for reproducibility if fixed seed provided
-        if self._seed is not None:
-            self._rng = random.Random(self._seed)
+        if seed is not None:
+            self._seed = seed
+        if self._seed is None:
+            self._seed = 42
+        self._rng = random.Random(self._seed)
 
+        # Map difficulty to threat count and cascade threshold
+        difficulty_map = {
+            "easy": (2, 0.8),
+            "medium": (3, 0.6),
+            "hard": (5, 0.4),
+        }
+        threat_count, cascade_threshold = difficulty_map.get(difficulty, (3, 0.6))
+        self._difficulty = difficulty
+        self._cascade_threshold = cascade_threshold
+        
         self._episode_id  = str(uuid.uuid4())[:8]
         self._step_count  = 0
         self._done        = False
@@ -152,7 +171,8 @@ class CrisisEnvironment:
         self._casualties_prevented = 0
 
         self._classify_attempts = 0
-        self._classify_correct  = 0
+        self._classify_full_correct = 0
+        self._classify_partial_correct = 0
         self._predict_attempts  = 0
         self._predict_errors    = []
         self._alloc_attempts    = 0
@@ -164,13 +184,13 @@ class CrisisEnvironment:
         self._rescue_steps         = []
 
         # Generate scenario
-        self._threats        = self._generate_threats()
+        self._threats        = self._generate_threats(threat_count)
         self._resources      = self._generate_resources()
         self._affected_zones = []
         self._total_population = sum(t.population_at_risk for t in self._threats)
 
         alerts = [
-            f"[EPISODE {self._episode_id}] INITIATED — {len(self._threats)} simultaneous threats detected.",
+            f"[EPISODE {self._episode_id}] INITIATED — {len(self._threats)} simultaneous threats detected (difficulty={difficulty}).",
             f"Available resources: {len(self._resources)} units across all zones.",
         ]
 
@@ -249,6 +269,7 @@ class CrisisEnvironment:
             step_count=self._step_count,
             total_steps=TOTAL_STEPS,
             episode_id=self._episode_id,
+            difficulty=self._difficulty,
             classification_score=c_score,
             prediction_score=p_score,
             allocation_score=a_score,
@@ -315,12 +336,14 @@ class CrisisEnvironment:
         sev_error    = abs(payload.predicted_severity - threat.severity)
         sev_correct  = sev_error <= 1.5  # within 1.5 severity points
 
+        # Check if zone also matches (for full correctness)
+        # The classification action doesn't include zone, so we only check type + severity
         if type_correct and sev_correct:
-            self._classify_correct += 1
+            self._classify_full_correct += 1
             reward = 1.0
             label  = "CORRECT"
         elif type_correct:
-            self._classify_correct += 1  # partial credit (0.5 effective)
+            self._classify_partial_correct += 1
             reward = 0.5
             label  = "PARTIAL (type correct, severity off)"
         else:
@@ -356,8 +379,9 @@ class CrisisEnvironment:
         threat.predicted_tti = payload.predicted_tti
         threat.predicted_pop = payload.predicted_pop
 
-        # Reward proportional to accuracy
-        reward = round(1.0 - combined_error * 1.5, 4)
+        # Reward proportional to accuracy (clamped to non-negative)
+        prediction_reward = max(0.0, 1.0 - combined_error)
+        reward = round(prediction_reward, 4)
 
         return reward, [
             f"[PREDICT] Threat {payload.threat_id} → "
@@ -506,17 +530,16 @@ class CrisisEnvironment:
             return -0.1, ["[WARN] EVACUATE: Unknown threat/zone ID."], {}
         
         # Each evacuation unit can move ~20 people
+        evac_zone = threat.zone if threat else (zone.zone_type if zone else ZoneType.URBAN)
         evac_multiplier = {
             ZoneType.URBAN:    20,
             ZoneType.MARITIME: 15,
             ZoneType.MILITARY: 25,
             ZoneType.RURAL:    30,
-        }.get(threat.zone if threat else ZoneType.URBAN, 20)
+        }.get(evac_zone, 20)
         
-        evacuated = min(
-            threat.population_at_risk if threat else zone.total_victims,
-            payload.evac_units * evac_multiplier
-        )
+        pop_to_evac = threat.population_at_risk if threat else (zone.total_victims if zone else 0)
+        evacuated = min(pop_to_evac, payload.evac_units * evac_multiplier)
         
         if threat:
             threat.population_evacuated = evacuated
@@ -526,7 +549,7 @@ class CrisisEnvironment:
             zone.evacuated = evacuated
             zone.evacuation_units_deployed += payload.evac_units
         
-        reward = (evacuated / max(threat.population_at_risk if threat else zone.total_victims, 1)) * 2.0
+        reward = (evacuated / max(pop_to_evac, 1)) * 2.0
         
         return round(reward, 4), [
             f"[EVACUATE] Zone {payload.zone_id}: {evacuated} people moved to safety "
@@ -604,7 +627,7 @@ class CrisisEnvironment:
                             f"[CONTAINED] {threat.location_name} neutralised! "
                             f"{prevented} casualties prevented."
                         )
-                    elif self._rng.random() < CASCADE_PROBABILITY:
+                    elif self._rng.random() < self._cascade_threshold:
                         # Threat not contained → spawn cascade secondary threat
                         cascade_type = self._rng.choice([
                             ThreatType.FIRE, ThreatType.EXPLOSION, ThreatType.FLOOD
@@ -700,7 +723,8 @@ class CrisisEnvironment:
         """Task 1: correct classifications / total attempts."""
         if self._classify_attempts == 0:
             return 0.0
-        raw = self._classify_correct / self._classify_attempts
+        # Full credit for full correct, 0.5 for partial correct
+        raw = (self._classify_full_correct * 1.0 + self._classify_partial_correct * 0.5) / self._classify_attempts
         return round(_clamp(raw), 4)
 
     def _grader_prediction(self) -> float:
@@ -747,9 +771,9 @@ class CrisisEnvironment:
     # GENERATION HELPERS
     # ─────────────────────────────────────────
 
-    def _generate_threats(self) -> List[ThreatInfo]:
-        """Generate THREAT_COUNT randomised threats from templates."""
-        chosen    = self._rng.sample(THREAT_TEMPLATES, THREAT_COUNT)
+    def _generate_threats(self, threat_count: int = 3) -> List[ThreatInfo]:
+        """Generate threat_count randomised threats from templates."""
+        chosen    = self._rng.sample(THREAT_TEMPLATES, threat_count)
         threats   = []
         for i, (ttype, zone, location, base_pop) in enumerate(chosen):
             severity   = round(self._rng.uniform(4.0, 10.0), 1)
@@ -789,8 +813,25 @@ class CrisisEnvironment:
     # ─────────────────────────────────────────
 
     def _build_observation(self, alerts: List[str]) -> CrisisObservation:
+        enriched_threats = []
+        for t in self._threats:
+            tti = max(t.time_to_impact, 1)
+            priority_score = (t.severity * t.population_at_risk) / tti
+            risk_level = "high" if priority_score > 500 else "medium" if priority_score > 100 else "low"
+            if tti <= 2 and t.population_at_risk > 1000:
+                recommended_action_hint = "evacuate"
+            elif t.severity >= 4:
+                recommended_action_hint = "allocate_resources"
+            else:
+                recommended_action_hint = "classify_and_monitor"
+            
+            t.priority_score = priority_score
+            t.risk_level = risk_level
+            t.recommended_action_hint = recommended_action_hint
+            enriched_threats.append(t)
+        
         return CrisisObservation(
-            threats=list(self._threats),
+            threats=enriched_threats,
             resources=list(self._resources),
             affected_zones=list(self._affected_zones),
             time_remaining=max(0, TOTAL_STEPS - self._step_count),

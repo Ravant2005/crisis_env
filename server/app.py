@@ -177,14 +177,15 @@ async def list_tasks():
 async def reset_endpoint(body: Optional[Dict[str, Any]] = None):
     """
     Reset the environment and return the initial observation.
-    Optional body: { "seed": <int>, "session_id": <str> }
+    Optional body: { "seed": <int>, "difficulty": <str>, "session_id": <str> }
     """
     body       = body or {}
     seed       = body.get("seed", None)
+    difficulty = body.get("difficulty", "medium")
     session_id = body.get("session_id", _DEFAULT_SESSION)
 
     env = _new_env(session_id=session_id, seed=seed)
-    obs = env.reset()
+    obs = env.reset(seed=seed, difficulty=difficulty)
     return {"status": "ok", "observation": _obs_to_dict(obs)}
 
 

@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-crisis-env-server = "server.app:main"
+server = "server.app:main"
 
 [tool.openenv]
 name = "crisis_response_env"
