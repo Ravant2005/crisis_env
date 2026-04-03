@@ -396,6 +396,11 @@ async def generic_exception_handler(request, exc: Exception):
 # ENTRY POINT (for local dev)
 # ─────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the server (used by [project.scripts] in pyproject.toml)."""
     import uvicorn
     uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
+
+
+if __name__ == "__main__":
+    main()

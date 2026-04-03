@@ -344,11 +344,24 @@ def run_episode(seed: int = SEED) -> Dict[str, float]:
     # ── Optional LLM client ────────────────────────────────────────────────
     llm_client = None
     if USE_LLM and _LLM_AVAILABLE:
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        model_name = os.getenv("MODEL_NAME", "gpt-4o-mini")
+        hf_token = os.getenv("HF_TOKEN", None)
+
+        # For HuggingFace inference endpoints, use /v1 suffix for OpenAI compatibility
+        # For localhost, don't set base_url (not needed for local inference)
+        if base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"):
+            # Local server - don't use OpenAI client for LLM calls
+            openai_base_url = None
+        else:
+            # Remote server (HuggingFace, etc.) - use OpenAI-compatible endpoint
+            openai_base_url = base_url.rstrip("/") + "/v1"
+
         llm_client = OpenAI(
-            base_url=API_BASE_URL if API_BASE_URL != "http://localhost:8000" else None,
-            api_key=HF_TOKEN or "sk-placeholder",
+            base_url=openai_base_url,
+            api_key=hf_token if hf_token else "EMPTY"
         )
-        log_info(f"LLM client initialised — model={MODEL_NAME}")
+        log_info(f"LLM client initialised — model={model_name} base_url={openai_base_url}")
 
     # ── Reset ──────────────────────────────────────────────────────────────
     reset_resp  = http_reset(seed=seed)

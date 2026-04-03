@@ -67,6 +67,9 @@ action_space:
     - name: rescue
       description: Deploy rescue units into an impacted zone
       payload: RescuePayload
+    - name: evacuate
+      description: Proactive evacuation before impact to reduce casualties
+      payload: EvacuationPayload
 
 tasks:
   - id: 1
@@ -146,5 +149,7 @@ inference:
     - API_BASE_URL
     - MODEL_NAME
     - HF_TOKEN
+    - SEED
+    - USE_LLM
   runtime_limit_minutes: 20
   machine: vcpu=2, memory=8gb

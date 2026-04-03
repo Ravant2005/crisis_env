@@ -16,7 +16,7 @@ from models import (
     CrisisAction, CrisisObservation, CrisisState, StepResult,
     ThreatInfo, ResourceInfo, AffectedZoneInfo,
     ClassificationPayload, PredictionPayload,
-    AllocationPayload, CoordinationPayload, RescuePayload,
+    AllocationPayload, CoordinationPayload, RescuePayload, EvacuationPayload,
 )
 
 # ─────────────────────────────────────────────
@@ -29,6 +29,7 @@ RESOURCE_COUNT     = 8           # total available resource units
 MAX_RESCUE_UNITS   = 5           # max rescue deployments per zone per step
 IMPACT_DECAY_RATE  = 1           # TTI decreases by 1 each step
 RESOURCE_MATCH_BONUS = 0.3       # bonus effectiveness when resource matches zone
+CASCADE_PROBABILITY = 0.4       # probability of cascade threat when not contained
 
 # Zone → preferred resource type mapping (for allocation scoring)
 ZONE_RESOURCE_AFFINITY: Dict[ZoneType, List[ResourceType]] = {
@@ -297,6 +298,8 @@ class CrisisEnvironment:
             return self._handle_coordinate(action.coordination)
         elif t == ActionType.RESCUE and action.rescue:
             return self._handle_rescue(action.rescue)
+        elif t == ActionType.EVACUATE and action.evacuate:
+            return self._handle_evacuate(action.evacuate)
         else:
             return -0.2, ["[WARN] Invalid or incomplete action received."], {}
 
@@ -317,7 +320,7 @@ class CrisisEnvironment:
             reward = 1.0
             label  = "CORRECT"
         elif type_correct:
-            self._classify_correct += 0.5  # partial
+            self._classify_correct += 1  # partial credit (0.5 effective)
             reward = 0.5
             label  = "PARTIAL (type correct, severity off)"
         else:
@@ -492,6 +495,44 @@ class CrisisEnvironment:
             f"Speed bonus={speed_bonus:.2f}"
         ], {"rescued": saved, "zone_id": payload.zone_id}
 
+    def _handle_evacuate(
+        self, payload: EvacuationPayload
+    ) -> Tuple[float, List[str], Dict]:
+        """Handle proactive evacuation action - reduces population before impact."""
+        threat = self._get_threat(payload.zone_id)
+        zone = self._get_zone(payload.zone_id)
+        
+        if threat is None and zone is None:
+            return -0.1, ["[WARN] EVACUATE: Unknown threat/zone ID."], {}
+        
+        # Each evacuation unit can move ~20 people
+        evac_multiplier = {
+            ZoneType.URBAN:    20,
+            ZoneType.MARITIME: 15,
+            ZoneType.MILITARY: 25,
+            ZoneType.RURAL:    30,
+        }.get(threat.zone if threat else ZoneType.URBAN, 20)
+        
+        evacuated = min(
+            threat.population_at_risk if threat else zone.total_victims,
+            payload.evac_units * evac_multiplier
+        )
+        
+        if threat:
+            threat.population_evacuated = evacuated
+            threat.population_at_risk = max(0, threat.population_at_risk - evacuated)
+        
+        if zone:
+            zone.evacuated = evacuated
+            zone.evacuation_units_deployed += payload.evac_units
+        
+        reward = (evacuated / max(threat.population_at_risk if threat else zone.total_victims, 1)) * 2.0
+        
+        return round(reward, 4), [
+            f"[EVACUATE] Zone {payload.zone_id}: {evacuated} people moved to safety "
+            f"by {payload.evac_units} units."
+        ], {"evacuated": evacuated, "zone_id": payload.zone_id}
+
     # ─────────────────────────────────────────
     # THREAT LIFECYCLE
     # ─────────────────────────────────────────
@@ -562,6 +603,31 @@ class CrisisEnvironment:
                         alerts.append(
                             f"[CONTAINED] {threat.location_name} neutralised! "
                             f"{prevented} casualties prevented."
+                        )
+                    elif self._rng.random() < CASCADE_PROBABILITY:
+                        # Threat not contained → spawn cascade secondary threat
+                        cascade_type = self._rng.choice([
+                            ThreatType.FIRE, ThreatType.EXPLOSION, ThreatType.FLOOD
+                        ])
+                        cascade_severity = round(threat.severity * 0.6, 1)
+                        cascade_pop = int(threat.population_at_risk * 0.4)
+                        cascade_tti = self._rng.randint(3, 8)
+                        
+                        new_threat = ThreatInfo(
+                            threat_id=len(self._threats) + 1,
+                            threat_type=cascade_type,
+                            status=ThreatStatus.ACTIVE,
+                            severity=cascade_severity,
+                            population_at_risk=max(10, cascade_pop),
+                            time_to_impact=cascade_tti,
+                            zone=threat.zone,
+                            location_name=f"{threat.location_name} (Cascade)",
+                        )
+                        self._threats.append(new_threat)
+                        self._total_population += new_threat.population_at_risk
+                        alerts.append(
+                            f"[CASCADE] Secondary {cascade_type} at {threat.location_name}! "
+                            f"severity={cascade_severity}, population={cascade_pop}, TTI={cascade_tti}"
                         )
 
         # Mark impacted threats as resolved once zone is fully rescued

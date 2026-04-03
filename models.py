@@ -19,6 +19,7 @@ class ActionType(str, Enum):
     ALLOCATE   = "allocate"      # Task 3 — assign a resource to a threat
     COORDINATE = "coordinate"   # Task 4 — set priority ordering across all active threats
     RESCUE     = "rescue"        # Task 5 — deploy rescue units post-impact
+    EVACUATE   = "evacuate"     # Proactive evacuation before impact
 
 
 class ThreatType(str, Enum):
@@ -75,6 +76,7 @@ class ThreatInfo(BaseModel):
     priority_rank:      Optional[int]     = Field(default=None, description="Agent's assigned priority rank (Task 4)")
     casualties:         int               = Field(default=0,  description="Casualties incurred after impact")
     casualties_prevented: int             = Field(default=0,  description="Casualties prevented by timely response")
+    population_evacuated: int             = Field(default=0,  description="Population evacuated before impact")
 
 
 class ResourceInfo(BaseModel):
@@ -96,6 +98,8 @@ class AffectedZoneInfo(BaseModel):
     rescued:            int      = Field(default=0, description="Victims already rescued")
     rescue_units_deployed: int   = Field(default=0)
     is_active:          bool     = Field(default=False, description="True if impact occurred here")
+    evacuated:          int      = Field(default=0, description="Population evacuated before impact")
+    evacuation_units_deployed: int = Field(default=0, description="Units used for evacuation")
 
 
 class ClassificationPayload(BaseModel):
@@ -131,6 +135,13 @@ class RescuePayload(BaseModel):
     rescue_units_to_send: int = Field(..., ge=1, description="Number of rescue units to dispatch")
 
 
+class EvacuationPayload(BaseModel):
+    """Payload for EVACUATE action — proactive evacuation before impact."""
+    zone_id:         int = Field(..., description="Zone to evacuate")
+    evac_units:      int = Field(..., ge=1, description="Number of evacuation units to deploy")
+    population_move: int = Field(default=0, description="Estimated population moved to safety")
+
+
 # ─────────────────────────────────────────────
 # CORE OpenEnv MODELS
 # ─────────────────────────────────────────────
@@ -148,6 +159,7 @@ class CrisisAction(BaseModel):
     allocation:     Optional[AllocationPayload]     = None
     coordination:   Optional[CoordinationPayload]   = None
     rescue:         Optional[RescuePayload]         = None
+    evacuate:       Optional[EvacuationPayload]    = None
 
     class Config:
         use_enum_values = True

@@ -1,0 +1,21 @@
+[project]
+name = "crisis_response_env"
+version = "1.0.0"
+description = "AI Crisis Response & Rescue Coordination Environment"
+requires-python = ">=3.9"
+dependencies = [
+    "openenv>=0.2.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "pydantic>=2.5.0",
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
+    "requests>=2.31.0",
+    "websocket-client>=1.7.0",
+]
+
+[project.scripts]
+crisis-env-server = "server.app:main"
+
+[tool.openenv]
+name = "crisis_response_env"
