@@ -139,8 +139,15 @@ reward:
     - terminal_resolve_bonus:    +0.0 to +3.0
 
 episode:
-  max_steps: 50
+  max_steps: 30
+  easy_steps: 22
+  medium_steps: 26
+  hard_steps: 30
   simultaneous_threats: 3
+  difficulty_profiles:
+    easy:   { threats: 2, obs_noise: 0.08, budget: 6 }
+    medium: { threats: 3, obs_noise: 0.16, budget: 5 }
+    hard:   { threats: 4, obs_noise: 0.24, budget: 4 }
   resource_units: 8
 
 inference:

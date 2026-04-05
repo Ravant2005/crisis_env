@@ -67,11 +67,13 @@ _cumulative_score: float = 0.0
 def log_start():
     print("[START]", flush=True)
 
-def log_step(action_type: str, target: str, result: str, reward: float, done: bool, decision_reasoning: str = "", cumulative_score: float = None):
+def log_step(action_type: str, target: str, result: str, reward: float, done: bool, decision_reasoning: str = "", cumulative_score: float = 0.0):
     global _step_counter, _cumulative_score
     _step_counter += 1
     if cumulative_score is not None:
         _cumulative_score = cumulative_score
+    else:
+        _cumulative_score = 0.0
     
     reasoning_str = f" | reasoning={decision_reasoning}" if decision_reasoning else ""
     print(
@@ -368,6 +370,7 @@ def _llm_suggest_priority(
 # MAIN EPISODE LOOP
 # ─────────────────────────────────────────────
 
+
 def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float]:
     """
     Run one full episode of the Crisis Response environment.
@@ -449,7 +452,7 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
         # Track whether coordinate runs this step (to skip allocation in same step)
         coordinate_this_step = False
         
-        # ── Phase 1: CLASSIFY all active threats (if not done) ─────────────
+
         if not classify_phase_done:
             classify_actions = []
             current_active = [t for t in threats if t.get("status") == "active"]

@@ -331,63 +331,66 @@ class CrisisEnvironment:
             self._done = True
 
         current_task_scores = self.task_scores()
-        adaptive_weights = self._adaptive_task_weights(prev_task_scores)
-        weighted_task_progress = sum(
-            adaptive_weights[k] * (current_task_scores[k] - prev_task_scores[k])
+        
+        step_task_progress = sum(
+            current_task_scores[k] - prev_task_scores[k]
             for k in CORE_TASKS
         )
-        task_success_reward = weighted_task_progress + action_bonus
-
-        # Time-efficiency pressure grows with elapsed steps.
-        delay_progress_penalty = DELAY_PROGRESS_K * float(self._step_count)
-        raw_step_reward = (
-            task_success_reward
-            - LAMBDA_TIME * time_penalty
-            - LAMBDA_RESOURCE_WASTE * resource_waste_penalty
-            - LAMBDA_PRIORITY_ERROR * wrong_priority_penalty
-            - LAMBDA_DELAY * delay_penalty
-            - delay_progress_penalty
+        
+        rescue_progress = 0.0
+        if self._done or self._step_count == self._episode_total_steps:
+            rescue_progress = _clamp(self._rescue_saved / max(self._total_population, 1))
+        
+        budget_utilization_before = max(0, 1.0 - (self._resource_budget_remaining + 1) / max(self._resource_budget_total, 1))
+        efficiency_gain = budget_utilization_before * 0.1
+        
+        time_penalty = self._step_count / max(self._episode_total_steps, 1)
+        
+        invalid_action_penalty = 0.0
+        valid_actions = self.valid_actions()
+        action_mask = valid_actions.get("action_mask", [])
+        if ACTION_TYPE_ORDER.index(action_name) < len(action_mask):
+            if int(action_mask[ACTION_TYPE_ORDER.index(action_name)]) == 0:
+                invalid_action_penalty = 1.0
+        
+        resource_waste_penalty = float(self._wasted_resource_events) / max(self._episode_total_steps, 1)
+        
+        step_reward = (
+            0.4 * step_task_progress
+            + 0.3 * rescue_progress
+            + 0.2 * efficiency_gain
+            - 0.1 * time_penalty
+            - 0.2 * invalid_action_penalty
+            - 0.15 * resource_waste_penalty
         )
-
-        if action_name in {"allocate", "coordinate", "rescue"}:
-            raw_step_reward *= 1.0 + EXECUTION_ACTION_GAMMA
-
-        coverage_bonus = self._action_coverage_bonus(action_name, prev_last_action_step)
-        raw_step_reward += coverage_bonus
-
-        terminal_reward = 0.0
-        high_risk_terminal_boost = 0.0
-        if self._done:
-            terminal_reward = _clamp(self._rescue_saved / max(self._total_population, 1))
-            high_risk_terminal_boost = self._terminal_high_risk_boost()
-            terminal_reward += high_risk_terminal_boost
-
-        raw_reward = (1.0 - UNIFIED_REWARD_LAMBDA) * raw_step_reward + UNIFIED_REWARD_LAMBDA * terminal_reward
-        step_reward = self._normalize_step_reward(raw_reward)
+        
+        step_reward = _clamp(step_reward)
 
         self._cumulative_reward += step_reward
 
-        info.update(
-            {
-                "task_success_reward": round(task_success_reward, 6),
-                "time_penalty": round(time_penalty, 6),
-                "resource_waste_penalty": round(resource_waste_penalty, 6),
-                "wrong_priority_penalty": round(wrong_priority_penalty, 6),
-                "delay_penalty": round(delay_penalty, 6),
-                "delay_progress_penalty": round(delay_progress_penalty, 6),
-                "balance_kl": 0.0,
-                "coverage_penalty": 0.0,
-                "coverage_bonus": round(coverage_bonus, 6),
-                "execution_multiplier": round((1.0 + EXECUTION_ACTION_GAMMA) if action_name in {"allocate", "coordinate", "rescue"} else 1.0, 6),
-                "sequence_bonus": 0.0,
-                "rescue_priority_bonus": 0.0,
-                "terminal_rescue_boost": round(terminal_reward, 6),
-                "terminal_high_risk_boost": round(high_risk_terminal_boost, 6),
-                "action_bonus": round(action_bonus, 6),
-                "adaptive_weights": {k: round(v, 5) for k, v in adaptive_weights.items()},
-                "raw_step_reward": round(raw_step_reward, 6),
-                "raw_reward": round(raw_reward, 6),
-            }
+        info = {
+            "step_task_progress": round(step_task_progress, 6),
+            "rescue_progress": round(rescue_progress, 6),
+            "efficiency_gain": round(efficiency_gain, 6),
+            "time_penalty": round(time_penalty, 6),
+            "invalid_action_penalty": round(invalid_action_penalty, 6),
+            "resource_waste_penalty": round(resource_waste_penalty, 6),
+        }
+
+        c_score = self._grader_classification()
+        p_score = self._grader_prediction()
+        a_score = self._grader_allocation()
+        co_score = self._grader_coordination()
+        r_score = self._grader_rescue()
+        
+        print(
+            f"[STEP {self._step_count}] "
+            f"Reward: {step_reward:.3f} | "
+            f"C:{c_score:.2f} "
+            f"P:{p_score:.2f} "
+            f"A:{a_score:.2f} "
+            f"Co:{co_score:.2f} "
+            f"R:{r_score:.2f}"
         )
 
         obs = self._build_observation(alerts)
@@ -914,23 +917,21 @@ class CrisisEnvironment:
         else:
             c, p, a, co, r = cached
 
-        weighted = (
-            c * 0.30
-            + p * 0.28
-            + a * 0.14
-            + co * 0.10
-            + r * 0.18
+        budget_efficiency = _clamp(1.0 - (self._resource_spent / max(self._resource_budget_total, 1) - 1.0) * 0.5 if self._resource_spent > self._resource_budget_total else 1.0)
+        time_efficiency = _clamp(1.0 - self._step_count / max(self._episode_total_steps, 1))
+
+        final_score = (
+            0.25 * c +
+            0.20 * p +
+            0.20 * a +
+            0.15 * co +
+            0.20 * r
         )
 
-        # Explicitly include constraints in final score to keep reward/objective aligned.
-        budget_eff = _clamp(1.0 - (self._resource_spent / max(self._resource_budget_total, 1) - 1.0) * 0.5 if self._resource_spent > self._resource_budget_total else 1.0)
-        time_eff = _clamp(1.0 - self._step_count / max(self._episode_total_steps, 1))
-        critical_ignore_penalty = _clamp(self._critical_ignored_steps / max(self._episode_total_steps * 3, 1))
+        final_score += 0.02 * budget_efficiency
+        final_score += 0.02 * time_efficiency
 
-        # Weighted task aggregation emphasizes uncertain reasoning tasks
-        # (classification + prediction) while preserving operational objectives.
-        score = 0.22 + weighted * 0.95 + budget_eff * 0.05 + time_eff * 0.04 - critical_ignore_penalty * 0.04
-        return round(_clamp(score, 0.0, 1.0), 4)
+        return round(max(0.0, min(1.0, final_score)), 4)
 
     # ─────────────────────────────────────────
     # OBSERVATION / PARTIAL OBSERVABILITY

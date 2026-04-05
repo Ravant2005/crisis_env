@@ -347,6 +347,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 tasks_resp = await list_tasks()
                 await send("tasks", tasks_resp)
 
+            # ── SCORES ────────────────────────────────────────────────────
+            elif command == "scores":
+                env = _get_env(session_id)
+                task_scores = env.task_scores()
+                st = env.state()
+                await send("scores", {
+                    "classification": round(task_scores.get("classification", 0.0), 4),
+                    "prediction":     round(task_scores.get("prediction",     0.0), 4),
+                    "allocation":     round(task_scores.get("allocation",     0.0), 4),
+                    "coordination":   round(task_scores.get("coordination",   0.0), 4),
+                    "rescue":         round(task_scores.get("rescue",         0.0), 4),
+                    "final":          round(st.final_score, 4),
+                })
+
             # ── UNKNOWN ───────────────────────────────────────────────────
             else:
                 await send("error", _error_response(

@@ -73,49 +73,59 @@ class PolicyNetwork(nn.Module):
     def __init__(
         self,
         state_dim: int = STATE_DIM,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
+        hidden_dim: int = 512,
+        dropout: float = 0.08,
     ) -> None:
         super().__init__()
         self.shape = PolicyShape(state_dim=state_dim, hidden_dim=hidden_dim)
 
-        self.encoder = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+        self.input_proj = nn.Linear(state_dim, hidden_dim)
+
+        self.enc_block1 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
+        )
+        self.enc_block2 = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
+        self.skip_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
-        self.strategy_head = nn.Linear(hidden_dim, self.NUM_STRATEGIES)
+        self.value_head = nn.Linear(hidden_dim, 1)
+
+        self.strategy_head    = nn.Linear(hidden_dim, self.NUM_STRATEGIES)
         self.action_type_head = nn.Linear(hidden_dim, self.NUM_ACTION_TYPES)
-
-        self.threat_head = nn.Linear(hidden_dim, MAX_THREATS)
-        self.resource_head = nn.Linear(hidden_dim, MAX_RESOURCES)
-        self.zone_head = nn.Linear(hidden_dim, MAX_ZONES)
-        self.units_head = nn.Linear(hidden_dim, MAX_RESCUE_UNITS)
-
-        self.severity_head = nn.Linear(hidden_dim, 10)
-        self.tti_head = nn.Linear(hidden_dim, 20)
-        self.pop_head = nn.Linear(hidden_dim, 20)
+        self.threat_head      = nn.Linear(hidden_dim, MAX_THREATS)
+        self.resource_head    = nn.Linear(hidden_dim, MAX_RESOURCES)
+        self.zone_head        = nn.Linear(hidden_dim, MAX_ZONES)
+        self.units_head       = nn.Linear(hidden_dim, MAX_RESCUE_UNITS)
+        self.severity_head    = nn.Linear(hidden_dim, 10)
+        self.tti_head         = nn.Linear(hidden_dim, 20)
+        self.pop_head         = nn.Linear(hidden_dim, 20)
 
     def forward(self, state_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
         if state_tensor.dim() == 1:
             state_tensor = state_tensor.unsqueeze(0)
 
-        h = self.encoder(state_tensor)
+        h = self.input_proj(state_tensor)
+        h = self.enc_block1(h) + self.skip_proj(h)
+        h = self.enc_block2(h) + h
+
         return {
-            "strategy": self.strategy_head(h),
+            "strategy":    self.strategy_head(h),
             "action_type": self.action_type_head(h),
-            "threat": self.threat_head(h),
-            "resource": self.resource_head(h),
-            "zone": self.zone_head(h),
-            "units": self.units_head(h),
-            "severity": self.severity_head(h),
-            "tti": self.tti_head(h),
-            "pop": self.pop_head(h),
+            "threat":      self.threat_head(h),
+            "resource":    self.resource_head(h),
+            "zone":        self.zone_head(h),
+            "units":       self.units_head(h),
+            "severity":    self.severity_head(h),
+            "tti":         self.tti_head(h),
+            "pop":         self.pop_head(h),
+            "value":       self.value_head(h),
         }
 
     @staticmethod

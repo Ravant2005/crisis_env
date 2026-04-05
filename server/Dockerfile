@@ -20,8 +20,10 @@ WORKDIR /app
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy application source
+# Copy application source — ALL modules required at runtime
 COPY models.py        ./models.py
+COPY utils.py         ./utils.py
+COPY policy_model.py  ./policy_model.py
 COPY openenv.yaml     ./openenv.yaml
 COPY inference.py     ./inference.py
 COPY client.py        ./client.py
