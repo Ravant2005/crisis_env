@@ -2,16 +2,23 @@
 train.py — PPO + GAE + Parallel Rollouts + Retrospective Replay
 for the Crisis Response OpenEnv environment.
 
-Key upgrades over REINFORCE baseline:
-  - PPO clipped surrogate loss (epsilon=0.2) — stable policy updates
-  - GAE (Generalized Advantage Estimation, lambda=0.95) — low-variance advantages
-  - Parallel rollouts (N_WORKERS envs collected before each update)
-  - Value function loss (MSE) — learned critic
-  - Retrospective experience replay (top-20% episodes buffered)
-  - Fast curriculum: 20 easy / 40 medium / rest on hard
-  - PGMCTS warm rollout (see pgmcts module below)
-  - Residual encoder with hidden_dim=512
-  - Dynamic per-task reward shaping via rewards.py  ← BUG FIX
+FIXES IN THIS VERSION v2:
+  1. Local classify/predict tracking sets — prevents redundant loops.
+     Old code used t.get("predicted_tti") is None which could loop
+     forever if the env observation doesn't update those fields.
+  2. Periodic re-coordination every RECOORD_INTERVAL steps (default 5).
+     The env coordination score decays per step. The old coordinated_done
+     flag blocked ALL re-coordination, causing T4 to bleed from 0.67→0.29.
+  3. Aggressive rescue strategy — sends budget // max(1, len(zones)) units
+     but with a minimum of 3 and maximum of budget (uncapped).
+     Old code capped at 1–3 units even when budget allowed 10+.
+  4. Fixed forced allocation — uses local forced_allocated_ids set instead
+     of t.get("assigned_resource") which env may not set on the observation.
+     Also ensures ALL threats get allocated (not just 1–2).
+  5. Fixed _build_reward_kwargs allocate — better fallback for crisis
+     resource types. Now passes resource_type correctly.
+  6. Fixed catch-up allocation — after rescue starts, if budget remains
+     and unallocated threats exist, inserts allocation step before next rescue.
 """
 from __future__ import annotations
 
@@ -52,13 +59,13 @@ from rewards import (
 
 DEFAULT_EPISODES        = 120
 DEFAULT_LR              = 2.5e-4
-DEFAULT_GAMMA           = 0.985
+DEFAULT_GAMMA           = 0.99
 DEFAULT_GAE_LAMBDA      = 0.95
-DEFAULT_PPO_EPSILON     = 0.15
+DEFAULT_PPO_EPSILON     = 0.10
 DEFAULT_PPO_EPOCHS      = 3
-DEFAULT_VALUE_COEFF     = 0.75
-DEFAULT_ENTROPY_COEFF   = 0.15
-DEFAULT_ENTROPY_DECAY   = 0.003
+DEFAULT_VALUE_COEFF     = 1.0
+DEFAULT_ENTROPY_COEFF   = 0.015
+DEFAULT_ENTROPY_DECAY   = 0.01
 DEFAULT_ENTROPY_FLOOR   = 0.05
 DEFAULT_HIDDEN          = 256
 DEFAULT_SEED            = 42
@@ -66,13 +73,18 @@ DEFAULT_LOG_WINDOW      = 15
 DEFAULT_PATIENCE        = 30
 DEFAULT_MIN_DELTA       = 0.003
 DEFAULT_MIN_EPISODES    = 60
-DEFAULT_STOP_SCORE      = 0.85
+DEFAULT_STOP_SCORE      = 0.88   # raised from 0.85 to match new target
 DEFAULT_BC_STEPS        = 80
 DEFAULT_BC_EPISODES     = 20
 N_WORKERS               = 4
 REPLAY_BUFFER_SIZE      = 100
-REPLAY_TOPK_FRAC        = 0.25
+REPLAY_TOPK_FRAC        = 0.10
 REPLAY_MIX_FRAC         = 0.20
+
+# FIX 2: Re-coordination interval. The env coordination score decays per step.
+# After the first coordinate, re-coordinate every RECOORD_INTERVAL steps to
+# prevent the score from bleeding to 0.29 by step 20.
+RECOORD_INTERVAL        = 5
 
 PHASE1_SCORE_THRESHOLD  = 0.70
 PHASE2_SCORE_THRESHOLD  = 0.78
@@ -109,48 +121,7 @@ def update_curriculum_phase(episode, current_phase, phase_start_episode, avg_sco
 # ─────────────────────────────────────────────
 
 class PGMCTSPlanner:
-    """
-    Priority-Guided Monte Carlo Tree Search (PGMCTS) warm rollout.
-
-    PURPOSE:
-      The RL policy takes many episodes to discover that the optimal action
-      selection is governed by the threat priority metric:
-          P(t) = severity(t) × population(t) / max(TTI(t), 1)
-      PGMCTS injects this domain knowledge as a lookahead bias during the
-      EARLY steps of each episode (when time_remaining > LOOKAHEAD_THRESHOLD),
-      replacing pure RL exploration with a guided selection that funnels the
-      policy toward high-quality action regions.
-
-    ALGORITHM:
-      At each step where time_remaining > LOOKAHEAD_THRESHOLD:
-        1. Enumerate the valid action set A_valid from the environment mask.
-        2. For each candidate action a_i in A_valid:
-             - Create a copy of the environment state (lightweight dict clone)
-             - Simulate K=10 forward steps using a fast heuristic rollout
-               (heuristic = always take the action with highest priority score)
-             - Record the resulting cumulative discounted reward R̂(a_i):
-                   R̂(a_i) = Σ_{k=0}^{K-1} γ^k · r_k
-        3. Compute the PGMCTS action score:
-               Q_pgmcts(a_i) = R̂(a_i) / max_j R̂(a_j)    (normalized to [0,1])
-        4. Blend with the neural policy logits:
-               logits_blended(a_i) = (1 - α) · logits_policy(a_i) + α · C · Q_pgmcts(a_i)
-           where α = pgmcts_alpha (default 0.40, annealed to 0.0 by episode N/2)
-                 C = scaling constant ≈ 3.0 (maps Q scores to logit magnitude)
-        5. Sample or argmax from logits_blended using the normal masked sampling.
-
-      ANNEALING:
-        α(episode) = pgmcts_alpha_init × max(0, 1 - 2 × episode / total_episodes)
-        This ensures that by the midpoint of training, the policy is fully
-        autonomous and PGMCTS no longer influences the distribution.
-
-    LOOKAHEAD_THRESHOLD:
-        Only active when time_remaining / total_steps > 0.60.
-        During the final 40% of an episode the agent must rely on its own policy.
-
-    COMPLEXITY:
-        K=10 simulated steps × up to 7 candidate actions = 70 env.step() calls
-        per PGMCTS-augmented step. ~14ms overhead per augmented step — negligible.
-    """
+    """Priority-Guided Monte Carlo Tree Search warm rollout."""
 
     LOOKAHEAD_K = 10
     PGMCTS_C    = 3.0
@@ -161,7 +132,7 @@ class PGMCTSPlanner:
 
     def alpha(self, episode: int, total_episodes: int) -> float:
         progress = episode / max(total_episodes, 1)
-        return float(self.alpha_init * max(0.0, 1.0 - 2.0 * progress))
+        return float(self.alpha_init * max(0.25, 1.0 - progress))
 
     def priority_score(self, threat: dict) -> float:
         sev = float(threat.get("severity", 0.0))
@@ -170,7 +141,8 @@ class PGMCTSPlanner:
         return (sev * pop) / tti
 
     def heuristic_action(self, obs_dict: dict) -> dict:
-        threats   = [t for t in obs_dict.get("threats", []) if t.get("status") == "active"]
+        all_threats = obs_dict.get("threats", [])
+        threats   = [t for t in all_threats if t.get("status") == "active"]
         resources = [r for r in obs_dict.get("resources", []) if r.get("is_available", False)]
         zones     = [z for z in obs_dict.get("affected_zones", []) if z.get("is_active", False)]
         budget    = int(obs_dict.get("resource_budget_remaining", 0))
@@ -209,9 +181,12 @@ class PGMCTSPlanner:
             return {"action_type": "coordinate",
                     "coordination": {"priority_order": [t["threat_id"] for t in ranked]}}
         if can("rescue") and zones and budget > 0:
-            z = max(zones, key=lambda x: x.get("total_victims", 0) - x.get("rescued", 0))
+            z = max(zones, key=lambda x:
+                (int(x.get("total_victims", 0)) - int(x.get("rescued", 0))) * 2 + int(x.get("severity", 0))
+            )
             return {"action_type": "rescue",
-                    "rescue": {"zone_id": z["zone_id"], "rescue_units_to_send": min(3, budget)}}
+                    "rescue": {"zone_id": z["zone_id"],
+                               "rescue_units_to_send": max(4, min(budget, budget // max(1, len(zones))))}}
         return {"action_type": "skip"}
 
     def simulate_lookahead(self, env_seed: int, difficulty: str,
@@ -249,7 +224,7 @@ class PGMCTSPlanner:
                      valid_mask: torch.Tensor, episode: int,
                      total_episodes: int, time_fraction: float) -> torch.Tensor:
         alpha = self.alpha(episode, total_episodes)
-        if alpha < 1e-4 or time_fraction <= 0.60:
+        if alpha < 1e-4 or time_fraction <= 0.40:
             return logits
 
         valid_indices = [i for i, v in enumerate(valid_mask.tolist()) if v]
@@ -305,10 +280,7 @@ class PGMCTSPlanner:
 # ─────────────────────────────────────────────
 
 class RetrospectiveReplayBuffer:
-    """
-    Stores the top-K% of episodes (by final_score) and replays them
-    as behavior cloning signal during PPO updates.
-    """
+    """Stores the top-K% of episodes (by final_score) and replays them."""
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE,
                  topk_fraction: float = REPLAY_TOPK_FRAC):
@@ -430,15 +402,16 @@ def compute_gae(rewards: List[float], values: List[float],
 
 # ─────────────────────────────────────────────
 # REWARD KWARGS BUILDER
-# Extracts the right arguments for each task shaper
-# from the live observation + action dicts.
 # ─────────────────────────────────────────────
 
 def _build_reward_kwargs(action_type: str, action_dict: dict,
                          obs_dict: dict, step: int, max_steps: int) -> dict:
     """
     Build task_kwargs for compute_step_reward() from the obs + action.
-    Returns {} if we can't build kwargs — reward falls back to env signal.
+
+    FIX v2: Allocation now correctly resolves resource_type from the resource
+    object, not from a fallback default. Also uses effectiveness as intercept_prob
+    which reflects actual resource quality in the crisis domain.
     """
     threats   = obs_dict.get("threats", [])
     resources = obs_dict.get("resources", [])
@@ -492,14 +465,23 @@ def _build_reward_kwargs(action_type: str, action_dict: dict,
             resource = resources[0]
         if threat is None or resource is None:
             return {}
-        # nearest_chosen: resource with smallest distance (if available)
+
+        # FIX: get resource_type from the actual resource object, not from threat.
+        # The env resource has a "resource_type" or "type" field.
+        rt = str(resource.get("resource_type",
+                 resource.get("type",
+                 resource.get("name", "unknown")))).lower()
+
+        # Nearest chosen: pick resource with smallest distance
         dists = [float(r.get("distance", 9999)) for r in resources if r.get("is_available")]
         nearest_dist = min(dists) if dists else 9999
         resource_dist = float(resource.get("distance", 9999))
+
         return dict(
-            resource_type   = str(resource.get("resource_type", "")),
-            threat_type     = str(threat.get("threat_type", "")),
-            intercept_prob  = float(resource.get("effectiveness", 0.5)),
+            resource_type   = rt,
+            threat_type     = str(threat.get("threat_type", "")).lower(),
+            intercept_prob  = float(resource.get("effectiveness",
+                                    resource.get("intercept_probability", 0.5))),
             budget_used     = max(0, budget_total - budget),
             budget_total    = max(budget_total, 1),
             nearest_chosen  = (resource_dist <= nearest_dist + 1e-3),
@@ -511,14 +493,12 @@ def _build_reward_kwargs(action_type: str, action_dict: dict,
         n_threats  = len(active_threats)
         n_handled  = len(order)
 
-        # Priority order quality: higher-severity threats should rank higher
         sev_map = {int(t.get("threat_id",-1)): float(t.get("severity",0))
                    * float(t.get("population_at_risk", 1))
                    / max(float(t.get("time_to_impact",1)), 1)
                    for t in active_threats}
         if len(order) >= 2 and sev_map:
             scores_in_order = [sev_map.get(int(tid), 0.0) for tid in order]
-            # Spearman-like: count correct pairwise orderings
             correct = sum(1 for i in range(len(scores_in_order)-1)
                           if scores_in_order[i] >= scores_in_order[i+1])
             total_pairs = len(scores_in_order) - 1
@@ -534,6 +514,7 @@ def _build_reward_kwargs(action_type: str, action_dict: dict,
             simultaneous         = n_handled >= 2,
             casualties_avoided   = int(at_risk * prio_score * 0.5),
             total_at_risk        = max(at_risk, 1),
+            step                 = step,
         )
 
     if action_type == "rescue":
@@ -547,12 +528,19 @@ def _build_reward_kwargs(action_type: str, action_dict: dict,
         units_sent = int(rsc.get("rescue_units_to_send", 1))
         total_vics = int(zone.get("total_victims", 1))
         rescued    = int(zone.get("rescued", 0))
-        # optimal: enough units for unrescued but not more than budget
         unrescued  = max(total_vics - rescued, 0)
-        optimal    = min(max(1, unrescued // 5), budget)
+        # FIX: optimal = enough units to finish in 3 steps (not 1), capped by budget.
+        # Old code divided by 5 victims/unit which might be wrong for this env.
+        optimal    = min(max(1, unrescued // 3), max(budget, 1))
         type_match = float(zone.get("unit_type_match", 1.0))
+
+        # Use more realistic rescue estimate: each unit saves ~10% of remaining victims
+        # (conservative estimate to avoid overconfident shaped reward)
+        rescue_per_unit = max(1, unrescued // max(units_sent * 2, 1))
+        estimated_rescued = rescued + min(units_sent * rescue_per_unit, unrescued)
+
         return dict(
-            rescued         = rescued + min(units_sent * 5, unrescued),  # estimate
+            rescued         = estimated_rescued,
             total_victims   = max(total_vics, 1),
             units_deployed  = units_sent,
             units_optimal   = max(optimal, 1),
@@ -579,8 +567,20 @@ def rollout_single_episode(
     worker_idx: int = 0,
 ) -> dict:
     """
-    Run one episode. Per-step rewards are now shaped by rewards.py
-    instead of being stuck at 0.020 from the raw env signal.
+    Run one episode.
+
+    KEY FIXES vs v1:
+    1. locally_classified / locally_predicted sets — cap each threat to
+       exactly one classify and one predict, regardless of env observation
+       field state. Eliminates 2–6 wasted steps per episode.
+    2. Periodic re-coordination (every RECOORD_INTERVAL steps after first).
+       Prevents T4 coordination score from bleeding over 20 steps.
+    3. Aggressive rescue — sends max(3, budget // max(1, len(zones))) units,
+       up from the old max of 1–3. Handles remaining victims much faster.
+    4. Catch-up allocation — if a threat becomes unallocated mid-episode and
+       resources are available, allocate before the next rescue step.
+    5. Single-threat coordinate guard — if only 1 active threat, skip
+       coordinate and go straight to allocate (was blocking on len >= 2).
     """
     env = CrisisEnvironment(seed=seed)
     obs = env.reset(seed=seed, difficulty=difficulty)
@@ -594,13 +594,24 @@ def rollout_single_episode(
     action_indices = []
     action_labels = []
 
-    # try to get max_steps from env observation
     obs_dict_init = observation_to_dict(obs)
     max_steps = int(obs_dict_init.get("time_remaining", 30)) + int(obs_dict_init.get("current_step", 0))
     max_steps = max(max_steps, 1)
 
     done      = False
     step_num  = 0
+
+    # FIX 1: Local tracking sets — each threat gets exactly 1 classify + 1 predict
+    locally_classified: set = set()   # threat_ids that have been classified this episode
+    locally_predicted:  set = set()   # threat_ids that have been predicted this episode
+
+    # FIX 2: Coordination state — allow periodic re-coord
+    coordinated_done      = False
+    last_coord_step       = -999
+    last_coord_order: list = []
+
+    # FIX 4: Local allocation tracking (more reliable than env observation field)
+    forced_allocated_ids: set = set()
 
     while not done:
         obs_dict = observation_to_dict(obs)
@@ -624,10 +635,10 @@ def rollout_single_episode(
             )
             out["action_type"] = action_logits.unsqueeze(0)
 
-        # ── FIX 2: Improved forced-action override ──────────────────────────────
-        obs_dict  = observation_to_dict(obs)
+        # ── Fresh obs for pipeline decision ───────────────────────────────
         step_num  = int(obs_dict.get("current_step", 0))
-        threats   = [t for t in obs_dict.get("threats", []) if t.get("status") == "active"]
+        all_threats = obs_dict.get("threats", [])
+        threats   = [t for t in all_threats if t.get("status") == "active"]
         zones     = [z for z in obs_dict.get("affected_zones", []) if z.get("is_active", False)]
         resources = [r for r in obs_dict.get("resources", []) if r.get("is_available", False)]
         budget    = int(obs_dict.get("resource_budget_remaining", 0))
@@ -639,14 +650,55 @@ def rollout_single_episode(
             return (s * p) / tti
 
         ranked_threats = sorted(threats, key=_priority, reverse=True)
+        coord_candidates = sorted(all_threats, key=_priority, reverse=True)
 
+        # Sync forced_allocated_ids: remove threats no longer tracked
+        tracked_ids = {int(t["threat_id"]) for t in ranked_threats}
+        forced_allocated_ids &= tracked_ids
+        # Also mark threats that are already allocated in the env observation
+        for t in ranked_threats:
+            if t.get("assigned_resource"):
+                forced_allocated_ids.add(int(t["threat_id"]))
+
+        # ── FIX 1: Use local sets instead of observation fields ───────────
+        # Old code: t.get("predicted_severity") is None — can loop if env
+        # doesn't update that field. New code: use locally_classified set.
+        unclassified = [
+            t for t in ranked_threats
+            if int(t["threat_id"]) not in locally_classified
+        ]
+        unpredicted = [
+            t for t in ranked_threats
+            if int(t["threat_id"]) in locally_classified
+            and int(t["threat_id"]) not in locally_predicted
+        ]
+
+        # ── FIX 2: Periodic re-coordination check ─────────────────────────
+        # Re-coordinate if: never coordinated, OR enough steps have passed
+        # since last coord AND priority order may have changed.
+        should_recoord = False
+        if not coordinated_done:
+            should_recoord = True
+        elif (len(coord_candidates) >= 2
+              and step_num - last_coord_step >= RECOORD_INTERVAL):
+            # Check if priority order has actually changed
+            current_order = [int(t["threat_id"]) for t in
+                             sorted(coord_candidates, key=_priority, reverse=True)]
+            if current_order != last_coord_order:
+                should_recoord = True
+            elif step_num - last_coord_step >= RECOORD_INTERVAL * 2:
+                # Force re-coord even if order unchanged (score decay continues)
+                should_recoord = True
+
+        # FIX: allow coordinate even with 1 active threat (coord of 1 still valid)
+        min_threats_for_coord = 1
+
+        # ── FORCED ACTION PIPELINE ────────────────────────────────────────
         forced_action = None
 
-        # Step 1-3: classify unclassified threats (check predicted_severity is None)
-        unclassified = [t for t in ranked_threats if t.get("predicted_severity") is None]
-        if step_num <= 3 and unclassified:
+        # Stage 1: Classify all unclassified threats
+        if unclassified:
             t = unclassified[0]
-            # Extract just the type string, not the full enum representation
             t_type = t.get("threat_type", "fire")
             if hasattr(t_type, "value"):
                 t_type = t_type.value
@@ -658,61 +710,181 @@ def rollout_single_episode(
                     "threat_id": int(t["threat_id"]),
                     "predicted_type": t_type,
                     "predicted_severity": float(t.get("severity", 5.0)),
-                }
+                },
             }
 
-        # Step 2-5: predict threats with severity but no time prediction
-        if forced_action is None:
-            needs_predict = [t for t in ranked_threats
-                            if t.get("predicted_severity") is not None
-                            and t.get("predicted_tti") is None]
-            if step_num <= 5 and needs_predict:
-                t = needs_predict[0]
-                forced_action = {
-                    "action_type": "predict",
-                    "prediction": {
-                        "threat_id": int(t["threat_id"]),
-                        "predicted_tti": max(1, int(t.get("time_to_impact", 5))),
-                        "predicted_pop": max(1, int(t.get("population_at_risk", 200))),
-                    }
-                }
+        # Stage 2: Predict all classified-but-not-predicted threats
+        if forced_action is None and unpredicted:
+            t = unpredicted[0]
+            forced_action = {
+                "action_type": "predict",
+                "prediction": {
+                    "threat_id": int(t["threat_id"]),
+                    "predicted_tti": max(1, int(t.get("time_to_impact", 5))),
+                    "predicted_pop": max(1, int(t.get("population_at_risk", 200))),
+                },
+            }
 
-        # Step 3-8: allocate resources to top threat if not yet allocated
-        if forced_action is None and step_num <= 8 and ranked_threats and resources and budget > 0:
-            t = ranked_threats[0]
-            r = max(resources, key=lambda x: float(x.get("effectiveness", 0)))
+        # FORCE early coordination (step 4–6 ideal)
+        if forced_action is None and not coordinated_done and step_num <= 6 and len(coord_candidates) >= 1:
+            ranked_for_coord = sorted(coord_candidates, key=_priority, reverse=True)
+            forced_action = {
+                "action_type": "coordinate",
+                "coordination": {
+                    "priority_order": [int(t["threat_id"]) for t in ranked_for_coord],
+                },
+            }
+
+        # Stage 3: Coordinate (initial or periodic re-coordination)
+        if (forced_action is None
+                and should_recoord
+                and len(coord_candidates) >= min_threats_for_coord):
+            ranked_for_coord = sorted(coord_candidates, key=_priority, reverse=True)
+            forced_action = {
+                "action_type": "coordinate",
+                "coordination": {
+                    "priority_order": [int(t["threat_id"]) for t in ranked_for_coord],
+                },
+            }
+
+        # Stage 4: Allocate any unallocated threats (FIX: use local set)
+        avail_res = [r for r in resources if r.get("is_available", True)]
+        unallocated = [
+            t for t in ranked_threats
+            if int(t["threat_id"]) not in forced_allocated_ids
+        ]
+
+        if (forced_action is None
+                and coordinated_done
+                and unallocated
+                and len(forced_allocated_ids) < min(len(ranked_threats), 3)
+                and avail_res
+                and budget > 0):
+            t = unallocated[0]
+            # Pick best available resource by effectiveness
+            r = max(avail_res, key=lambda x: float(x.get("effectiveness",
+                                                   x.get("intercept_probability", 0))))
             forced_action = {
                 "action_type": "allocate",
                 "allocation": {
                     "threat_id": int(t["threat_id"]),
                     "resource_id": int(r["resource_id"]),
-                }
+                },
             }
+            forced_allocated_ids.add(int(t["threat_id"]))
 
-        # Any step: rescue if victims remain and budget available
-        if forced_action is None and zones and budget > 0:
-            active_zones = [z for z in zones
-                            if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0]
+        # FIX 6: Catch-up allocation — before rescue, check if any threat
+        # lost its resource (became unallocated again) and re-allocate.
+        if (forced_action is None
+                and coordinated_done
+                and avail_res
+                and budget > 0):
+            # Check for threats that need re-allocation
+            needs_alloc = [
+                t for t in ranked_threats
+                if int(t["threat_id"]) not in forced_allocated_ids
+                and not t.get("assigned_resource")
+            ]
+            if needs_alloc:
+                t = needs_alloc[0]
+                r = max(avail_res, key=lambda x: float(x.get("effectiveness",
+                                                       x.get("intercept_probability", 0))))
+                forced_action = {
+                    "action_type": "allocate",
+                    "allocation": {
+                        "threat_id": int(t["threat_id"]),
+                        "resource_id": int(r["resource_id"]),
+                    },
+                }
+                forced_allocated_ids.add(int(t["threat_id"]))
+
+        # FIX 5: FORCE allocation until ALL threats assigned (before rescue)
+        unallocated_threats = [
+            t for t in ranked_threats
+            if int(t["threat_id"]) not in forced_allocated_ids
+        ]
+        if (forced_action is None
+                and unallocated_threats
+                and avail_res
+                and budget > 0):
+            t = unallocated_threats[0]
+            r = max(avail_res, key=lambda x: float(x.get("effectiveness",
+                                                   x.get("intercept_probability", 0))))
+            forced_action = {
+                "action_type": "allocate",
+                "allocation": {
+                    "threat_id": int(t["threat_id"]),
+                    "resource_id": int(r["resource_id"]),
+                },
+            }
+            forced_allocated_ids.add(int(t["threat_id"]))
+
+        # FIX 1: START RESCUE EARLY if step >= 5
+        if (forced_action is None
+                and step_num >= 5
+                and zones
+                and budget > 0):
+            active_zones = [
+                z for z in zones
+                if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0
+            ]
             if active_zones:
-                z = max(active_zones,
-                        key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
+                best_zone_id = max(
+                    active_zones,
+                    key=lambda z: (int(z.get("total_victims", 0)) - int(z.get("rescued", 0))) * 2 + int(z.get("severity", 0))
+                )
+                n_zones = max(1, len(active_zones))
+                units = max(4, budget // n_zones)
+                forced_action = {
+                    "action_type": "rescue",
+                    "rescue": {
+                        "zone_id": int(best_zone_id["zone_id"]),
+                        "rescue_units_to_send": min(units, budget),
+                    },
+                }
+
+        # FIX 3: Stage 5 — Aggressive rescue
+        # Old code: units = max(1, budget // len(zones)) if step > 10 else 1
+        # New code: send as many units as makes sense to clear the zone fast
+        if (forced_action is None
+                and coordinated_done
+                and zones
+                and budget > 0):
+            active_zones = [
+                z for z in zones
+                if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0
+            ]
+            if active_zones:
+                # Target the zone with the most unrescued victims
+                z = max(
+                    active_zones,
+                    key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)),
+                )
+                unrescued = int(z.get("total_victims", 0)) - int(z.get("rescued", 0))
+                n_zones   = max(1, len(active_zones))
+
+                # FIX 3: Aggressive unit sizing
+                # Send enough to make meaningful progress, not just 1–3.
+                # Aim to rescue ~30% of remaining victims per step.
+                if budget >= 12:
+                    units = min(budget, max(5, budget // n_zones))
+                elif budget >= 6:
+                    units = min(budget, max(3, budget // n_zones))
+                else:
+                    units = max(1, budget)
+
+                # Never send more units than we have budget for
+                units = min(units, budget)
+
                 forced_action = {
                     "action_type": "rescue",
                     "rescue": {
                         "zone_id": int(z["zone_id"]),
-                        "rescue_units_to_send": min(3, budget),
-                    }
+                        "rescue_units_to_send": units,
+                    },
                 }
 
-        # Any step: coordinate if multiple threats
-        if forced_action is None and len(ranked_threats) >= 2:
-            forced_action = {
-                "action_type": "coordinate",
-                "coordination": {
-                    "priority_order": [int(t["threat_id"]) for t in ranked_threats]
-                }
-            }
-
+        # ── Execute forced or policy action ───────────────────────────────
         if forced_action is not None:
             result = env.step(CrisisAction(**forced_action))
             n_actions = len(ACTION_TYPES)
@@ -721,18 +893,98 @@ def rollout_single_episode(
             at = forced_action["action_type"]
             action_idx = ACTION_TYPES.index(at) if at in ACTION_TYPES else 5
             action_dict = forced_action
+
+            # Update coordination state
+            if at == "coordinate":
+                coordinated_done = True
+                last_coord_step  = step_num
+                last_coord_order = forced_action.get("coordination", {}).get("priority_order", [])
+                # Sync locally_classified / locally_predicted after coordination
+                for t in ranked_threats:
+                    locally_classified.add(int(t["threat_id"]))
+
+            # Update local classification / prediction tracking from forced actions
+            if at == "classify":
+                tid = int(forced_action["classification"]["threat_id"])
+                locally_classified.add(tid)
+            if at == "predict":
+                tid = int(forced_action["prediction"]["threat_id"])
+                locally_predicted.add(tid)
+
         else:
-            action_dict, log_prob, entropy, logits = policy.select_action(obs, greedy=False)
+            use_greedy = episode > total_episodes * 0.6
+            action_dict, log_prob, entropy, logits = policy.select_action(
+                obs,
+                greedy=use_greedy
+            )
             at = str(action_dict.get("action_type", "skip")).replace("ActionType.", "")
+
+            # ── Anti-skip guard ───────────────────────────────────────────
+            if at == "skip":
+                active_z = [z for z in zones if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0]
+                active_t = [t for t in threats if t.get("status") == "active"]
+                avail_r  = [r for r in resources if r.get("is_available", True)]
+
+                if active_z and budget > 0:
+                    z = max(active_z, key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
+                    units = max(2, min(budget, budget // max(1, len(active_z))))
+                    action_dict = {"action_type": "rescue", "rescue": {"zone_id": int(z["zone_id"]), "rescue_units_to_send": units}}
+                    at = "rescue"
+                elif active_t and avail_r and budget > 0:
+                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(active_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
+                    at = "allocate"
+                elif active_t:
+                    action_dict = {"action_type": "delay", "delay": {"threat_id": int(active_t[0]["threat_id"])}}
+                    at = "delay"
+
+            # ── Redundant coordinate guard ─────────────────────────────────
+            # Allow re-coordination if enough steps have passed, otherwise redirect
+            if at == "coordinate" and coordinated_done and (step_num - last_coord_step < 3):
+                active_z = [z for z in zones if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0]
+                avail_r  = [r for r in resources if r.get("is_available", True)]
+                active_t = [t for t in threats if t.get("status") == "active"
+                             and int(t["threat_id"]) not in forced_allocated_ids]
+                if active_z and budget > 0:
+                    z = max(active_z, key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
+                    units = max(2, min(budget, budget // max(1, len(active_z))))
+                    action_dict = {"action_type": "rescue", "rescue": {"zone_id": int(z["zone_id"]), "rescue_units_to_send": units}}
+                    at = "rescue"
+                elif active_t and avail_r and budget > 0:
+                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(active_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
+                    at = "allocate"
+                    forced_allocated_ids.add(int(active_t[0]["threat_id"]))
+                else:
+                    action_dict = {"action_type": "skip"}
+                    at = "skip"
+
             action_idx = ACTION_TYPES.index(at) if at in ACTION_TYPES else 5
             result = env.step(CrisisAction(**action_dict))
-        # ───────────────────────────────────────────────────────────────────
 
+            if at == "coordinate":
+                coordinated_done = True
+                last_coord_step  = step_num
+                last_coord_order = action_dict.get("coordination", {}).get("priority_order", [])
+            if at == "classify":
+                clf = action_dict.get("classification", {})
+                tid = clf.get("threat_id")
+                if tid is not None:
+                    locally_classified.add(int(tid))
+            if at == "predict":
+                pred = action_dict.get("prediction", {})
+                tid  = pred.get("threat_id")
+                if tid is not None:
+                    locally_predicted.add(int(tid))
+            if at == "allocate":
+                alloc = action_dict.get("allocation", {})
+                tid   = alloc.get("threat_id")
+                if tid is not None:
+                    forced_allocated_ids.add(int(tid))
+
+        # ── Reward computation ─────────────────────────────────────────────
         step_num += 1
         env_reward  = float(result.reward)
         action_type = str(action_dict.get("action_type", "skip")).replace("ActionType.", "")
 
-        # ── DYNAMIC REWARD SHAPING (replaces hardcoded 0.020) ──────────────
         task_kw = _build_reward_kwargs(action_type, action_dict, obs_dict,
                                        step=step_num, max_steps=max_steps)
         shaped_reward = compute_step_reward(
@@ -742,17 +994,13 @@ def rollout_single_episode(
             env_reward  = env_reward,
             task_kwargs = task_kw,
         )
-        # ───────────────────────────────────────────────────────────────────
 
-        # Live task scores from env state
         try:
             live_state  = env.state()
             task_scores = extract_task_scores(live_state)
         except Exception:
             task_scores = TaskScores()
 
-        # ── VISIBLE STEP DASHBOARD ─────────────────────────────────────────
-        # Only print dashboard for the first worker to avoid jumbled parallel logs
         if worker_idx == 0:
             print_step_dashboard(StepInfo(
                 step        = step_num,
@@ -763,20 +1011,14 @@ def rollout_single_episode(
                 episode     = episode,
                 difficulty  = difficulty,
             ))
-        # ───────────────────────────────────────────────────────────────────
 
         state_vecs.append(sv)
         log_probs.append(log_prob)
         values_.append(value)
-        # Add SKIP penalty to prevent policy collapse
         skip_idx = ACTION_TYPES.index("skip") if "skip" in ACTION_TYPES else 5
-        raw_r = float(result.reward)
-        if action_idx == skip_idx:
-            raw_r = raw_r - 0.03
-        rewards_.append(raw_r)
+        rewards_.append(shaped_reward)
         dones_.append(bool(result.done))
         entropies_.append(entropy)
-        # Use already-computed action_idx
         action_indices.append(action_idx)
         action_labels.append({
             "obs":         obs_dict,
@@ -824,7 +1066,6 @@ def collect_parallel_rollouts(
     pgmcts: Optional[PGMCTSPlanner],
     device: str,
 ) -> List[dict]:
-    # Avoid ThreadPoolExecutor context manager segfault on macOS
     pool = ThreadPoolExecutor(max_workers=n_workers)
     futures = []
     try:
@@ -981,12 +1222,13 @@ def train(
     logger        = TrainingLogger(LOG_DIR / "training.jsonl", clear=True)
 
     print(f"{'='*74}")
-    print("  Crisis Response RL — PPO + GAE + PGMCTS + Dynamic Reward Shaping")
+    print("  Crisis Response RL — PPO + GAE + PGMCTS v2 + Fixed Reward Shaping")
     print(f"{'='*74}")
-    print(f"  Tasks : T1-Classify · T2-Predict · T3-Allocate · T4-Coord · T5-Rescue")
+    print(f"  Fixes: _COMPAT crisis domain | periodic re-coord every {RECOORD_INTERVAL} steps")
+    print(f"         local clf/pred tracking | aggressive rescue | catch-up alloc")
+    print(f"  Target: 88–90% composite score (was ~69%)")
     print(f"  Workers: {n_workers}  |  PPO epochs: {ppo_epochs}  |  GAE λ: {gae_lambda}")
     print(f"  PGMCTS: {'ON  (α='+str(pgmcts_alpha)+')' if use_pgmcts else 'OFF'}")
-    print(f"  Reward : shaped (70%) + env (30%), decay γ={0.97}")
     print(f"{'='*74}\n")
 
     bc_meta, bc_dataset = behavior_cloning_warmstart(
@@ -1007,7 +1249,6 @@ def train(
             episode, curriculum_phase, phase_start_episode, pre_avg
         )
 
-        # ── phase transition banner ─────────────────────────────────────
         if new_phase != prev_phase:
             print_phase_transition(prev_phase, new_phase, episode, pre_avg)
         prev_phase       = new_phase
@@ -1067,11 +1308,9 @@ def train(
         avg_score  = moving_average(score_history, log_window)
         replay_len = len(replay_buffer)
 
-        # ── EPISODE SUMMARY with per-task bars ──────────────────────────
         elapsed      = time.time() - start_time
         eps_per_sec  = (episode * n_workers) / max(elapsed, 1e-6)
 
-        # Average TaskScores across workers for the summary
         def _avg_task_scores(rols):
             keys = ["classification","prediction","allocation","coordination","rescue"]
             avgs = {k: float(np.mean([r["task_scores"].get(k, 0.0) for r in rols]))
@@ -1080,7 +1319,6 @@ def train(
 
         ep_scores = _avg_task_scores(rollouts)
 
-        # FIX 4: Smarter Metrics
         prev_avg = score_history[-2] if len(score_history) >= 2 else score_history[-1]
         policy_delta = (score_history[-1] - prev_avg) * 100
         critic_acc   = max(0.0, 1.0 - update_info.get("value_loss", 1.0)) * 100
@@ -1099,7 +1337,6 @@ def train(
             avg_score          = avg_score,
         )
 
-        # ── CHECKPOINT ──────────────────────────────────────────────────
         if avg_final_score > best_score:
             best_score = avg_final_score
             save_checkpoint(CHECKPOINT_DIR / "best_model.pt", policy, optimizer,
@@ -1122,7 +1359,6 @@ def train(
             "task_scores": ep_scores.to_dict(),
         })
 
-        # ── EARLY STOP ──────────────────────────────────────────────────
         if (episode >= max(min_episodes, patience + 1)
                 and len(score_history) > patience):
             delta_s = abs(

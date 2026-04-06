@@ -257,16 +257,25 @@ def build_valid_action_mask(observation: Any) -> Dict[str, Any]:
         if len(raw_action_mask) != len(ACTION_TYPES):
             raw_action_mask = [1] * len(ACTION_TYPES)
     else:
+        active_threats = [t for t in obs.get("threats", []) if t.get("status") == "active"]
+        unallocated_threats = [t for t in active_threats if t.get("assigned_resource") is None]
+        unclassified_threats = [t for t in active_threats if t.get("predicted_severity") is None]
+        unpredicted_threats = [t for t in active_threats if t.get("predicted_tti") is None]
+        
+        # Prevent redundant coordination if recent and no new threats
+        recent = [str(a) for a in obs.get("recent_actions", [])]
+        coordinated_recently = "coordinate" in recent
+        
         action_enabled = {
-            "classify": int(bool(threats)),
-            "predict": int(bool(threats)),
-            "allocate": int(bool(threats and resources and budget_remaining > 0)),
-            "coordinate": int(len(threats) >= 2),
+            "classify": int(bool(unclassified_threats)),
+            "predict": int(bool(unpredicted_threats)),
+            "allocate": int(bool(unallocated_threats and resources and budget_remaining > 0)),
+            "coordinate": int(len(active_threats) >= 2 and not coordinated_recently),
             "rescue": int(bool(zones and budget_remaining > 0)),
             "skip": 1,
-            "delay": int(bool(threats)),
+            "delay": int(bool(active_threats)),
         }
-        raw_action_mask = [action_enabled[a] for a in ACTION_TYPES]
+        raw_action_mask = [action_enabled.get(a, 1) for a in ACTION_TYPES]
 
     threat_ids = [int(t["threat_id"]) for t in threats[:MAX_THREATS] if isinstance(t.get("threat_id"), (int, str))]
     resource_ids = [int(r["resource_id"]) for r in resources[:MAX_RESOURCES] if isinstance(r.get("resource_id"), (int, str))]
@@ -700,10 +709,7 @@ def baseline_allocate(threat: Dict[str, Any], resources: Sequence[Dict[str, Any]
     if not ranked:
         return None
 
-    # Imperfect choice: 25% chance to pick second-best resource.
     pick = ranked[0]
-    if len(ranked) > 1 and rng.random() < 0.12:
-        pick = ranked[1]
 
     return {
         "action_type": "allocate",
@@ -720,16 +726,12 @@ def baseline_rescue_action(zone: Dict[str, Any], budget_remaining: int, rng: ran
     if not zone.get("is_active", False) or remaining <= 0 or budget_remaining <= 0:
         return None
 
-    if remaining > 140:
-        units = 5
-    elif remaining > 70:
-        units = 4
-    else:
+    if remaining > 300:
         units = 3
-
-    # Slight inefficiency
-    if rng.random() < 0.08:
-        units = max(1, units - 1)
+    elif remaining > 150:
+        units = 2
+    else:
+        units = 1
 
     units = min(units, MAX_RESCUE_UNITS, budget_remaining)
     if units <= 0:
@@ -770,47 +772,42 @@ def choose_baseline_action(
     step = int(observation.get("current_step", 0))
 
     active = [t for t in threats if t.get("status") == "active"]
-    active_zones = [z for z in zones if z.get("is_active", False)]
+    tracked_threats = list(threats)
 
-    # Rescue-first when there are active victims.
+    unclassified = [t for t in active if int(t["threat_id"]) not in classified]
+    unpredicted = [t for t in active if int(t["threat_id"]) not in predicted]
+    coordinated = (coordinated_step >= 0)
+
+    if unclassified:
+        target = unclassified[0]
+        classified.add(int(target["threat_id"]))
+        return baseline_classification(target, rng), coordinated_step
+
+    if unpredicted:
+        target = unpredicted[0]
+        predicted.add(int(target["threat_id"]))
+        return baseline_prediction(target, rng), coordinated_step
+
+    if not coordinated or (len(tracked_threats) >= 2 and step - coordinated_step >= 5):
+        if len(active) >= 2 or not coordinated:
+            return baseline_coordinate(threats, rng), step
+
+    allocated_count = sum(1 for t in active if t.get("assigned_resource") is not None)
+    unallocated = [t for t in active if t.get("assigned_resource") is None]
+    if unallocated and resources and budget_remaining > 0 and allocated_count < len(active):
+        ranked = sorted(unallocated, key=_priority_score, reverse=True)
+        target = ranked[0]
+        alloc = baseline_allocate(target, resources, rng)
+        if alloc is not None:
+             return alloc, coordinated_step
+
+    active_zones = [z for z in zones if (int(z.get("total_victims", 0)) - int(z.get("rescued", 0))) >= 5]
     if active_zones and budget_remaining > 0:
         zone = max(active_zones, key=lambda z: int(z.get("total_victims", 0)) - int(z.get("rescued", 0)))
-        action = baseline_rescue_action(zone, budget_remaining, rng)
-        if action is not None:
-            return action, coordinated_step
+        res = baseline_rescue_action(zone, budget_remaining, rng)
+        if res:
+             return res, coordinated_step
 
-    # Periodic coordination (not every step).
-    if active and (step - coordinated_step >= 2) and rng.random() < 0.90:
-        return baseline_coordinate(threats, rng), step
-
-    # Work on highest-priority threat.
-    if active:
-        target = sorted(active, key=_priority_score, reverse=True)[0]
-        tid = int(target["threat_id"])
-
-        if tid not in classified and rng.random() < 0.98:
-            classified.add(tid)
-            return baseline_classification(target, rng), coordinated_step
-
-        if tid not in predicted and rng.random() < 0.96:
-            predicted.add(tid)
-            return baseline_prediction(target, rng), coordinated_step
-
-        if budget_remaining > 0 and rng.random() < 0.90:
-            alloc = baseline_allocate(target, resources, rng)
-            if alloc is not None:
-                return alloc, coordinated_step
-
-        if int(target.get("time_to_impact", 99)) <= 2 and rng.random() < 0.55:
-            return baseline_delay(target), coordinated_step
-
-    # Intentional idle probability for weaker baseline.
-    if rng.random() < 0.05:
-        return {"action_type": "skip", "strategy": "balanced"}, coordinated_step
-
-    # Fallback
-    if active:
-        return baseline_coordinate(threats, rng), step
     return {"action_type": "skip", "strategy": "balanced"}, coordinated_step
 
 

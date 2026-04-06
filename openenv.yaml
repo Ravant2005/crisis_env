@@ -80,8 +80,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Correctly identify the type and severity of each active threat.
-      Score = correct_predictions / total_predictions.
-
+      Score = 0.55 × exact_match + 0.25 × domain_match + 0.20 × severity_accuracy.
   - id: 2
     name: Impact Prediction
     difficulty: medium
@@ -90,8 +89,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Predict time-to-impact and population affected for each threat.
-      Score = 1 - normalised_error.
-
+      Score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio).
   - id: 3
     name: Resource Allocation
     difficulty: medium_plus
@@ -100,8 +98,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Assign the most effective zone-matched resource to each threat.
-      Score = mean(allocation_quality_scores).
-
+      Score = 0.45 × type_compatibility + 0.30 × intercept_prob + 0.15 × budget_efficiency + 0.10 × proximity.
   - id: 4
     name: Multi-Threat Coordination
     difficulty: hard
@@ -110,8 +107,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Set optimal priority ordering across all simultaneous threats.
-      Score = weighted rank-correlation vs ideal severity×pop/TTI ordering.
-
+      Score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided.
   - id: 5
     name: Rescue Optimisation
     difficulty: advanced
@@ -120,8 +116,7 @@ tasks:
     score_range: [0.0, 1.0]
     description: >
       Deploy rescue units into impacted zones to maximise lives saved.
-      Score = (lives_saved_ratio + speed_score + resource_efficiency) / 3.
-
+      Score = 0.40 × victims_saved + 0.25 × unit_efficiency + 0.20 × speed_score + 0.15 × unit_type_match.
 reward:
   internal_range: [-inf, +inf]
   final_score_range: [0.0, 1.0]

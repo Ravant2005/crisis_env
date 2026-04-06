@@ -57,8 +57,19 @@ def evaluate(
     checkpoint_path: Path = DEFAULT_CHECKPOINT,
     seed: int = 42,
     device: str = "cpu",
+    hidden_dim: int = 256,
 ) -> None:
-    policy = PolicyNetwork(state_dim=STATE_DIM).to(device)
+    # First, quickly peek at the checkpoint to infer the correct hidden_dim
+    import torch
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        sd = ckpt.get("model_state_dict", {})
+        if "input_proj.weight" in sd:
+            hidden_dim = sd["input_proj.weight"].shape[0]
+    except Exception:
+        pass
+        
+    policy = PolicyNetwork(state_dim=STATE_DIM, hidden_dim=hidden_dim).to(device)
     metadata = load_checkpoint(checkpoint_path, policy, device=device)
     policy.eval()
 

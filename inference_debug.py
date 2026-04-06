@@ -63,15 +63,15 @@ MAX_ACTIONS_PER_STEP = 6    # execute up to 6 actions per step (increased to fit
 # LOGGING
 # ─────────────────────────────────────────────
 
-_step: int = 0
+_step_counter: int = 0
 _cumulative_score: float = 0.0
 
 def log_start():
     print("[START]", flush=True)
 
 def log_step(action_type: str, target: str, result: str, reward: float, done: bool, decision_reasoning: str = "", cumulative_score: float = 0.0):
-    global _step, _cumulative_score
-    _step += 1
+    global _step_counter, _cumulative_score
+    _step_counter += 1
     if cumulative_score is not None:
         _cumulative_score = cumulative_score
     else:
@@ -79,7 +79,7 @@ def log_step(action_type: str, target: str, result: str, reward: float, done: bo
     
     reasoning_str = f" | reasoning={decision_reasoning}" if decision_reasoning else ""
     print(
-        f"[STEP {_step}] "
+        f"[STEP {_step_counter}] "
         f"action={action_type} | target={target} | result={result} | "
         f"reward={reward:.4f} | done={done}{reasoning_str} | cumulative_score={_cumulative_score:.4f}",
         flush=True,
@@ -376,8 +376,8 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
     Run one full episode of the Crisis Response environment.
     Returns the final grader scores.
     """
-    global _step, _cumulative_score
-    _step = 0
+    global _step_counter, _cumulative_score
+    _step_counter = 0
     _cumulative_score = 0.0
     
     # Use a unique session ID for this episode to avoid state conflicts
@@ -428,16 +428,16 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
     classified: set = set()
     predicted: set = set()
     allocated: set = set()
-    coordinated = False
+    coordinated_done: bool = False
     allocation_count: int = 0
-    last_coord_step = -1
+    last_coordination_step: int = -999
 
     # ── Episode loop ───────────────────────────────────────────────────────
-    step = 0
+    step_counter = 0
     _live_resource_budget = 99  # initialized; updated after every http_step call
     
-    while not done and step < 50:
-        step += 1
+    while not done and step_counter < 50:
+        step_counter += 1
         
         # Get current active threats
         active_threats = [t for t in threats if t.get("status") == "active"]
@@ -457,19 +457,9 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
             phase = "classify"
         elif unpredicted:
             phase = "predict"
-        elif not coordinated:
+        elif not coordinated_done or (coordinated_done and len(tracked_threats) >= 2 and (step_counter - last_coordination_step >= 5)):
             phase = "coordinate"
-        elif coordinated and len(tracked_threats) >= 2 and (step - last_coord_step >= 5):
-            # Determine if priorities changed
-            scope = active_threats if len(active_threats) >= 2 else tracked_threats
-            ranked = sorted(scope, key=_priority_score, reverse=True)
-            current_order = [t["threat_id"] for t in ranked]
-            if current_order != last_coord_order:
-                phase = "coordinate"
-            elif len(allocated) < min(len(active_threats), _live_resource_budget):
-                phase = "allocate"
-            else:
-                phase = "rescue"
+            print(f"DEBUG: step={step_counter} last_coord={last_coordination_step} len={len(tracked_threats)} coord_done={coordinated_done}")
         elif len(allocated) < min(len(active_threats), _live_resource_budget):
             phase = "allocate"
         else:
@@ -498,10 +488,9 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
                     }
                 else:
                     ranked = sorted(coord_scope, key=_priority_score, reverse=True)
-                    new_order = [t["threat_id"] for t in ranked]
                     coord_action = {
                         "action_type": "coordinate",
-                        "coordination": {"priority_order": new_order},
+                        "coordination": {"priority_order": [t["threat_id"] for t in ranked]},
                     }
                 actions_to_execute.append(("coordinate", {"threat_id": "all"}, coord_action))
             else:
@@ -627,9 +616,8 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
                     allocated.add(int(alloc_tid))
                     allocation_count += 1
             if action_label == "coordinate":
-                coordinated = True
-                last_coord_step = step
-                last_coord_order = action_payload.get("coordination", {}).get("priority_order", [])
+                coordinated_done = True
+                last_coordination_step = step_counter
         
         # Small delay between steps
         time.sleep(STEP_DELAY)

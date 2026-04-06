@@ -60,6 +60,12 @@ The environment trains an AI agent across five tasks that mirror the five phases
 When an incident alert arrives, the first thing a real coordinator must do is identify **what kind of threat it is and how severe it is**. Is this an airstrike on a military installation, a drone attack approaching a civilian district, a ship-borne attack on a naval port, or an explosion at a public transport hub? The threat type determines everything about what response assets are appropriate.
 
 In the environment, the agent receives a partially-observable threat signal — the observed severity, location, and zone type — and must classify the threat by type (airstrike, ship attack, drone threat, explosion, flood, or fire) and predict its severity on a 0–10 scale. The observation is deliberately noisy: the true severity is obscured by Gaussian noise scaled to the difficulty level (σ ranges from 0.08 on easy to 0.24 on hard), and the agent is also given explicit uncertainty estimates — `severity_uncertainty`, `population_uncertainty`, `tti_uncertainty` — that tell it how much to trust its own sensor readings. This models the fog-of-war reality where field reports are incomplete and contradictory.
+ 
+The classification grader computes:
+```
+classification_score = 0.55 × exact_match + 0.25 × domain_match + 0.20 × severity_accuracy
+```
+where `severity_accuracy` applies a Gaussian penalty based on how far the predicted severity deviated from truth.
 
 **Real-world analogue:** A drone threat approaching an urban district at 03:00 is initially detected as an unidentified radar contact. The operations centre must classify it as hostile drone (vs. commercial aircraft or weather anomaly), estimate its severity, and trigger the appropriate response chain — all within 90 seconds. An agent trained on this task learns to reason under sensor uncertainty in exactly this way.
 
@@ -70,7 +76,7 @@ Once a threat is classified, the next question is: **when will it hit, and how m
 The agent must predict TTI in steps and the number of people at risk. Both predictions are evaluated against the true hidden state. The grader computes a normalised composite error:
 
 ```
-prediction_score = 1.0 - 0.5 × normalised_TTI_error - 0.5 × normalised_population_error
+prediction_score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio)
 ```
 
 The normalised TTI error is `|predicted_TTI - true_TTI| / episode_length`. The normalised population error is `|predicted_pop - true_pop| / true_pop`. An agent that predicts both perfectly scores 1.0; an agent that is off by one step on TTI and 10% on population still scores above 0.85. Partial credit exists for good-but-not-perfect predictions.
@@ -85,9 +91,9 @@ The environment contains 8 resource units across 7 types: military units, coast 
 
 The allocation grader computes:
 ```
-allocation_score = 0.50 × effectiveness + 0.30 × zone_affinity + 0.20 × budget_efficiency − waste_penalty
+allocation_score = 0.45 × type_compatibility + 0.30 × intercept_prob + 0.15 × budget_efficiency + 0.10 × proximity_bonus
 ```
-where `zone_affinity` is a ratio of resources deployed in their affinity zones and `budget_efficiency` penalizes overspending.
+where `type_compatibility` checks if the resource matches the threat explicitly, and `budget_efficiency` penalizes overspending.
 
 The global resource budget (8–10 units per episode depending on difficulty) creates a genuine combinatorial optimisation problem. The agent cannot deploy every resource to every threat; it must solve a constraint-satisfaction problem under uncertainty. Deploying a low-quality or zone-mismatched resource not only wastes budget — it increases `resource_waste_events` which feeds directly into a penalty term in the reward function.
 
@@ -103,7 +109,12 @@ The coordination task asks the agent to submit a `priority_order` — an ordered
 true_priority(t) = true_severity(t) × true_population(t) / max(true_TTI(t), 1)
 ```
 
-The coordination grader uses a **weighted rank-correlation score** that assigns greater penalty to getting the top-ranked threat wrong than to getting the fourth-ranked wrong. If the agent places the highest-priority threat anywhere other than position 1, a `wrong_priority_penalty` is applied to both the grader score and the step reward. This models the real operational reality that getting the most urgent threat wrong is a category error, while minor reshuffling of lower-priority threats is tolerable.
+The coordination grader computes a composite score:
+```
+coordination_score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided
+```
+
+For the `priority_ordering` component, it uses a **weighted rank-correlation score** that assigns greater penalty to getting the top-ranked threat wrong than to getting the fourth-ranked wrong. If the agent places the highest-priority threat anywhere other than position 1, a `wrong_priority_penalty` is applied to both the grader score and the step reward. This models the real operational reality that getting the most urgent threat wrong is a category error, while minor reshuffling of lower-priority threats is tolerable.
 
 The hard difficulty forces the agent to coordinate 4 simultaneous threats with 24% observation noise, a 4-unit resource budget, and a 23% per-step escalation probability — creating a dynamic where the priority order can change mid-episode as threats escalate or are contained.
 
@@ -115,11 +126,12 @@ When a threat impacts before it can be neutralised, the operations centre shifts
 
 The rescue task activates when a threat's TTI reaches zero and it transitions to `IMPACTED` status, creating an `AffectedZoneInfo` record with a `total_victims` count. The agent must deploy rescue units into the zone by specifying `zone_id` and `rescue_units_to_send`. The number of victims saved per deployed unit depends on the zone type (urban: 1.0×, military: 0.9×, maritime: 0.85×, rural: 0.78×), stochastic rescue effectiveness (seeded, range 0.45–1.15), and remaining resource budget.
 
-The rescue grader computes a three-component score:
+The rescue grader computes a four-component score:
 ```
-rescue_score = 0.60 × (victims_saved / total_victims)
-             + 0.25 × speed_score
-             + 0.15 × resource_efficiency
+rescue_score = 0.40 × (victims_saved / total_victims)
+             + 0.25 × unit_efficiency
+             + 0.20 × speed_score
+             + 0.15 × unit_type_match
 ```
 
 `speed_score` is `1 - (average_rescue_step / episode_length)` — it rewards agents that rescue early rather than late. `resource_efficiency` is `victims_saved / (units_deployed × 14)` — it rewards agents that extract maximum survival from each unit deployed. When all threats are prevented before impact (through good allocation and coordination), rescue scores a baseline of `0.60 + 0.40 × (casualties_prevented / total_population)`, rewarding preventive excellence even in the absence of post-impact rescue activity.
