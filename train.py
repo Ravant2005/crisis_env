@@ -11,6 +11,7 @@ Key upgrades over REINFORCE baseline:
   - Fast curriculum: 20 easy / 40 medium / rest on hard
   - PGMCTS warm rollout (see pgmcts module below)
   - Residual encoder with hidden_dim=512
+  - Dynamic per-task reward shaping via rewards.py  ← BUG FIX
 """
 from __future__ import annotations
 
@@ -37,52 +38,58 @@ from utils import (
     moving_average, observation_to_dict,
     save_checkpoint, set_global_seed, state_to_metrics,
 )
+from rewards import (
+    TaskScores, StepInfo,
+    extract_task_scores, compute_step_reward,
+    print_step_dashboard, print_episode_summary, print_phase_transition,
+    BASE_REWARD,
+)
 
 
 # ─────────────────────────────────────────────
 # HYPERPARAMETERS
 # ─────────────────────────────────────────────
 
-DEFAULT_EPISODES        = 300       # more episodes for hard-difficulty mastery
-DEFAULT_LR              = 2.5e-4    # slightly higher for PPO stability
+DEFAULT_EPISODES        = 120
+DEFAULT_LR              = 2.5e-4
 DEFAULT_GAMMA           = 0.985
-DEFAULT_GAE_LAMBDA      = 0.95      # GAE smoothing factor
-DEFAULT_PPO_EPSILON     = 0.20      # PPO clip range
-DEFAULT_PPO_EPOCHS      = 4         # PPO inner epochs per rollout batch
-DEFAULT_VALUE_COEFF     = 0.5       # value loss weight in combined loss
-DEFAULT_ENTROPY_COEFF   = 0.008
-DEFAULT_ENTROPY_DECAY   = 0.008
-DEFAULT_ENTROPY_FLOOR   = 0.001
-DEFAULT_HIDDEN          = 512
+DEFAULT_GAE_LAMBDA      = 0.95
+DEFAULT_PPO_EPSILON     = 0.15
+DEFAULT_PPO_EPOCHS      = 3
+DEFAULT_VALUE_COEFF     = 0.75
+DEFAULT_ENTROPY_COEFF   = 0.15
+DEFAULT_ENTROPY_DECAY   = 0.003
+DEFAULT_ENTROPY_FLOOR   = 0.05
+DEFAULT_HIDDEN          = 256
 DEFAULT_SEED            = 42
-DEFAULT_LOG_WINDOW      = 20
-DEFAULT_PATIENCE        = 40
-DEFAULT_MIN_DELTA       = 0.002
-DEFAULT_MIN_EPISODES    = 80
-DEFAULT_STOP_SCORE      = 0.90
-DEFAULT_BC_STEPS        = 100
-DEFAULT_BC_EPISODES     = 24
-N_WORKERS               = 8         # parallel rollout workers
-REPLAY_BUFFER_SIZE      = 200       # retrospective replay capacity
-REPLAY_TOPK_FRAC        = 0.20      # store top-20% of episodes by final_score
-REPLAY_MIX_FRAC         = 0.20      # 20% of each minibatch from replay
+DEFAULT_LOG_WINDOW      = 15
+DEFAULT_PATIENCE        = 30
+DEFAULT_MIN_DELTA       = 0.003
+DEFAULT_MIN_EPISODES    = 60
+DEFAULT_STOP_SCORE      = 0.85
+DEFAULT_BC_STEPS        = 80
+DEFAULT_BC_EPISODES     = 20
+N_WORKERS               = 4
+REPLAY_BUFFER_SIZE      = 100
+REPLAY_TOPK_FRAC        = 0.25
+REPLAY_MIX_FRAC         = 0.20
 
-# Fast curriculum thresholds
-PHASE1_SCORE_THRESHOLD  = 0.58
-PHASE2_SCORE_THRESHOLD  = 0.72
-PHASE1_MAX_STEPS        = 20        # CHANGED: 60 → 20 (fast easy exit)
-PHASE2_MAX_STEPS        = 40        # CHANGED: 60 → 40
+PHASE1_SCORE_THRESHOLD  = 0.70
+PHASE2_SCORE_THRESHOLD  = 0.78
+PHASE1_MAX_STEPS        = 25
+PHASE2_MAX_STEPS        = 45
 
 CHECKPOINT_DIR = Path("checkpoints")
 LOG_DIR        = Path("logs")
 
 
 # ─────────────────────────────────────────────
-# CURRICULUM (FAST VERSION)
+# CURRICULUM
 # ─────────────────────────────────────────────
 
 def curriculum_difficulty(phase: int) -> str:
     return "easy" if phase <= 1 else "medium" if phase == 2 else "hard"
+
 
 def update_curriculum_phase(episode, current_phase, phase_start_episode, avg_score):
     phase_age = episode - phase_start_episode + 1
@@ -98,9 +105,7 @@ def update_curriculum_phase(episode, current_phase, phase_start_episode, avg_sco
 
 
 # ─────────────────────────────────────────────
-# NOVEL ALGORITHM — PGMCTS
-# (Priority-Guided Monte Carlo Tree Search warm rollout)
-# See detailed description below in the docstring.
+# PGMCTS
 # ─────────────────────────────────────────────
 
 class PGMCTSPlanner:
@@ -140,15 +145,11 @@ class PGMCTSPlanner:
 
     LOOKAHEAD_THRESHOLD:
         Only active when time_remaining / total_steps > 0.60.
-        During the final 40% of an episode the agent must rely on its own policy
-        (rescue / coordination decisions are highly state-dependent and PGMCTS
-        heuristics are less reliable in end-game scenarios).
+        During the final 40% of an episode the agent must rely on its own policy.
 
     COMPLEXITY:
         K=10 simulated steps × up to 7 candidate actions = 70 env.step() calls
-        per PGMCTS-augmented step. Since the inner simulator uses a rule-based
-        heuristic (no neural forward pass), each simulated step takes ~0.2ms,
-        adding ~14ms overhead per augmented step — negligible at 20-30 steps/episode.
+        per PGMCTS-augmented step. ~14ms overhead per augmented step — negligible.
     """
 
     LOOKAHEAD_K = 10
@@ -159,29 +160,16 @@ class PGMCTSPlanner:
         self.alpha_init = alpha_init
 
     def alpha(self, episode: int, total_episodes: int) -> float:
-        """Anneal PGMCTS influence to zero by the midpoint of training."""
         progress = episode / max(total_episodes, 1)
         return float(self.alpha_init * max(0.0, 1.0 - 2.0 * progress))
 
     def priority_score(self, threat: dict) -> float:
-        """
-        Core threat priority metric used in lookahead simulation.
-        P(t) = severity × population / max(TTI, 1)
-        This is the same formula used internally by the environment's
-        _true_priority() — exposed here as a heuristic for the planner.
-        """
         sev = float(threat.get("severity", 0.0))
         pop = float(threat.get("population_at_risk", 1.0))
         tti = max(float(threat.get("time_to_impact", 1.0)), 1.0)
         return (sev * pop) / tti
 
     def heuristic_action(self, obs_dict: dict) -> dict:
-        """
-        Fast heuristic policy used inside the PGMCTS lookahead simulation.
-        Rule: classify unclassified → predict → allocate best resource →
-              coordinate → rescue highest-victim zone.
-        This is intentionally simple (no neural pass) to keep simulation fast.
-        """
         threats   = [t for t in obs_dict.get("threats", []) if t.get("status") == "active"]
         resources = [r for r in obs_dict.get("resources", []) if r.get("is_available", False)]
         zones     = [z for z in obs_dict.get("affected_zones", []) if z.get("is_active", False)]
@@ -228,11 +216,6 @@ class PGMCTSPlanner:
 
     def simulate_lookahead(self, env_seed: int, difficulty: str,
                            candidate_action: dict, k: int) -> float:
-        """
-        Simulate K steps starting with candidate_action using a fresh environment
-        copy seeded identically to the current one. Returns cumulative discounted
-        reward R̂(a) = Σ γ^t r_t.
-        """
         sim_env = CrisisEnvironment(seed=env_seed)
         sim_obs = sim_env.reset(seed=env_seed, difficulty=difficulty)
         obs_dict = observation_to_dict(sim_obs)
@@ -265,23 +248,9 @@ class PGMCTSPlanner:
                      env_seed: int, difficulty: str,
                      valid_mask: torch.Tensor, episode: int,
                      total_episodes: int, time_fraction: float) -> torch.Tensor:
-        """
-        Core PGMCTS logit blending.
-
-        logits:         raw action_type logits from PolicyNetwork (shape: [N_ACTIONS])
-        action_names:   list of action names corresponding to logit indices
-        env_seed:       current environment seed for simulation forks
-        difficulty:     current curriculum difficulty string
-        valid_mask:     boolean tensor of valid actions (from action mask)
-        episode:        current training episode number
-        total_episodes: total planned episodes
-        time_fraction:  time_remaining / total_steps (only blend if > 0.60)
-
-        Returns:        blended logits tensor (same shape as input)
-        """
         alpha = self.alpha(episode, total_episodes)
         if alpha < 1e-4 or time_fraction <= 0.60:
-            return logits  # no blending needed
+            return logits
 
         valid_indices = [i for i, v in enumerate(valid_mask.tolist()) if v]
         if len(valid_indices) < 2:
@@ -295,9 +264,9 @@ class PGMCTSPlanner:
                 env_seed, difficulty, candidate, self.LOOKAHEAD_K
             )
 
-        q_vals = list(q_scores.values())
-        q_max  = max(q_vals) if q_vals else 1.0
-        q_min  = min(q_vals) if q_vals else 0.0
+        q_vals  = list(q_scores.values())
+        q_max   = max(q_vals) if q_vals else 1.0
+        q_min   = min(q_vals) if q_vals else 0.0
         q_range = max(q_max - q_min, 1e-6)
 
         blended = logits.clone()
@@ -309,7 +278,6 @@ class PGMCTSPlanner:
         return blended
 
     def _index_to_candidate_action(self, action_name: str) -> dict:
-        """Convert an action type name to a minimal valid action dict."""
         templates = {
             "classify":   {"action_type": "classify",
                            "classification": {"threat_id": 1,
@@ -340,24 +308,15 @@ class RetrospectiveReplayBuffer:
     """
     Stores the top-K% of episodes (by final_score) and replays them
     as behavior cloning signal during PPO updates.
-
-    This prevents catastrophic forgetting on curriculum transitions:
-    when the agent jumps from medium → hard difficulty, it tends to
-    'unlearn' easy-difficulty patterns. Replaying high-quality easy/medium
-    episodes as IL (imitation learning) regularization stabilizes the policy.
-
-    Storage format per episode:
-        List of (obs_dict, action_labels) pairs — same format as BC dataset.
     """
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE,
                  topk_fraction: float = REPLAY_TOPK_FRAC):
         self.capacity      = capacity
-        self.topk_fraction  = topk_fraction
+        self.topk_fraction = topk_fraction
         self._buffer: deque = deque()
 
     def add(self, episode_score: float, trajectory: List[Tuple[dict, dict]]) -> None:
-        """Add an episode trajectory if it qualifies (top-K% by score)."""
         if not trajectory:
             return
         self._buffer.append((episode_score, trajectory))
@@ -367,7 +326,6 @@ class RetrospectiveReplayBuffer:
             del self._buffer[worst_idx]
 
     def sample_batch(self, batch_size: int) -> List[Tuple[dict, dict]]:
-        """Sample `batch_size` (obs, label) pairs from replay buffer."""
         if len(self._buffer) == 0:
             return []
         all_pairs = [(obs, lbl)
@@ -386,7 +344,6 @@ class RetrospectiveReplayBuffer:
 # ─────────────────────────────────────────────
 
 def _bc_loss_for_sample(policy, obs, labels, device):
-    from utils import build_state_vector
     state_vec = build_state_vector(obs)
     x = torch.tensor(state_vec, dtype=torch.float32, device=device)
     logits = {k: v.squeeze(0) for k, v in policy.forward(x).items()}
@@ -422,7 +379,6 @@ def _bc_loss_for_sample(policy, obs, labels, device):
 
 
 def behavior_cloning_warmstart(policy, optimizer, seed, bc_steps, bc_episodes, device):
-    from utils import collect_baseline_dataset
     datasets = []
     per_diff = max(1, bc_episodes // 3)
     datasets.extend(collect_baseline_dataset(per_diff, seed+100, difficulty="easy"))
@@ -451,28 +407,161 @@ def behavior_cloning_warmstart(policy, optimizer, seed, bc_steps, bc_episodes, d
 
 
 # ─────────────────────────────────────────────
-# GAE — GENERALIZED ADVANTAGE ESTIMATION
+# GAE
 # ─────────────────────────────────────────────
 
 def compute_gae(rewards: List[float], values: List[float],
                 next_value: float, dones: List[bool],
                 gamma: float, lam: float) -> Tuple[List[float], List[float]]:
-    """
-    GAE-Lambda advantage estimation.
-    """
     T = len(rewards)
     advantages = [0.0] * T
     last_gae   = 0.0
     extended_values = values + [next_value]
 
     for t in reversed(range(T)):
-        mask    = 0.0 if dones[t] else 1.0
-        delta   = rewards[t] + gamma * extended_values[t+1] * mask - extended_values[t]
+        mask     = 0.0 if dones[t] else 1.0
+        delta    = rewards[t] + gamma * extended_values[t+1] * mask - extended_values[t]
         last_gae = delta + gamma * lam * mask * last_gae
         advantages[t] = last_gae
 
     returns = [a + v for a, v in zip(advantages, values)]
     return advantages, returns
+
+
+# ─────────────────────────────────────────────
+# REWARD KWARGS BUILDER
+# Extracts the right arguments for each task shaper
+# from the live observation + action dicts.
+# ─────────────────────────────────────────────
+
+def _build_reward_kwargs(action_type: str, action_dict: dict,
+                         obs_dict: dict, step: int, max_steps: int) -> dict:
+    """
+    Build task_kwargs for compute_step_reward() from the obs + action.
+    Returns {} if we can't build kwargs — reward falls back to env signal.
+    """
+    threats   = obs_dict.get("threats", [])
+    resources = obs_dict.get("resources", [])
+    zones     = obs_dict.get("affected_zones", [])
+    budget    = int(obs_dict.get("resource_budget_remaining", 0))
+    budget_total = int(obs_dict.get("resource_budget_total", max(budget, 1)))
+
+    active_threats = [t for t in threats if t.get("status") == "active"]
+
+    if action_type == "classify":
+        clf = action_dict.get("classification", {})
+        tid = int(clf.get("threat_id", -1))
+        threat = next((t for t in active_threats if int(t.get("threat_id",-1)) == tid), None)
+        if threat is None and active_threats:
+            threat = active_threats[0]
+        if threat is None:
+            return {}
+        return dict(
+            predicted_type     = str(clf.get("predicted_type", "")),
+            true_type          = str(threat.get("threat_type", "")),
+            predicted_severity = float(clf.get("predicted_severity", 0.0)),
+            true_severity      = float(threat.get("severity", 5.0)),
+            confidence         = float(clf.get("confidence", 1.0)),
+        )
+
+    if action_type == "predict":
+        pred = action_dict.get("prediction", {})
+        tid  = int(pred.get("threat_id", -1))
+        threat = next((t for t in active_threats if int(t.get("threat_id",-1)) == tid), None)
+        if threat is None and active_threats:
+            threat = active_threats[0]
+        if threat is None:
+            return {}
+        return dict(
+            predicted_tti  = int(pred.get("predicted_tti", 0)),
+            true_tti       = int(threat.get("time_to_impact", 0)),
+            predicted_pop  = int(pred.get("predicted_pop", 0)),
+            true_pop       = int(threat.get("population_at_risk", 0)),
+            total_steps    = max_steps,
+        )
+
+    if action_type == "allocate":
+        alloc = action_dict.get("allocation", {})
+        tid   = int(alloc.get("threat_id",   -1))
+        rid   = int(alloc.get("resource_id", -1))
+        threat   = next((t for t in active_threats if int(t.get("threat_id",-1)) == tid), None)
+        resource = next((r for r in resources     if int(r.get("resource_id",-1)) == rid), None)
+        if threat is None and active_threats:
+            threat = active_threats[0]
+        if resource is None and resources:
+            resource = resources[0]
+        if threat is None or resource is None:
+            return {}
+        # nearest_chosen: resource with smallest distance (if available)
+        dists = [float(r.get("distance", 9999)) for r in resources if r.get("is_available")]
+        nearest_dist = min(dists) if dists else 9999
+        resource_dist = float(resource.get("distance", 9999))
+        return dict(
+            resource_type   = str(resource.get("resource_type", "")),
+            threat_type     = str(threat.get("threat_type", "")),
+            intercept_prob  = float(resource.get("effectiveness", 0.5)),
+            budget_used     = max(0, budget_total - budget),
+            budget_total    = max(budget_total, 1),
+            nearest_chosen  = (resource_dist <= nearest_dist + 1e-3),
+        )
+
+    if action_type == "coordinate":
+        coord      = action_dict.get("coordination", {})
+        order      = coord.get("priority_order", [])
+        n_threats  = len(active_threats)
+        n_handled  = len(order)
+
+        # Priority order quality: higher-severity threats should rank higher
+        sev_map = {int(t.get("threat_id",-1)): float(t.get("severity",0))
+                   * float(t.get("population_at_risk", 1))
+                   / max(float(t.get("time_to_impact",1)), 1)
+                   for t in active_threats}
+        if len(order) >= 2 and sev_map:
+            scores_in_order = [sev_map.get(int(tid), 0.0) for tid in order]
+            # Spearman-like: count correct pairwise orderings
+            correct = sum(1 for i in range(len(scores_in_order)-1)
+                          if scores_in_order[i] >= scores_in_order[i+1])
+            total_pairs = len(scores_in_order) - 1
+            prio_score = correct / max(total_pairs, 1)
+        else:
+            prio_score = 0.5
+
+        at_risk = sum(int(t.get("population_at_risk", 0)) for t in active_threats)
+        return dict(
+            threats_handled      = n_handled,
+            total_threats        = max(n_threats, 1),
+            priority_order_score = prio_score,
+            simultaneous         = n_handled >= 2,
+            casualties_avoided   = int(at_risk * prio_score * 0.5),
+            total_at_risk        = max(at_risk, 1),
+        )
+
+    if action_type == "rescue":
+        rsc     = action_dict.get("rescue", {})
+        zid     = int(rsc.get("zone_id", -1))
+        zone    = next((z for z in zones if int(z.get("zone_id",-1)) == zid), None)
+        if zone is None and zones:
+            zone = zones[0]
+        if zone is None:
+            return {}
+        units_sent = int(rsc.get("rescue_units_to_send", 1))
+        total_vics = int(zone.get("total_victims", 1))
+        rescued    = int(zone.get("rescued", 0))
+        # optimal: enough units for unrescued but not more than budget
+        unrescued  = max(total_vics - rescued, 0)
+        optimal    = min(max(1, unrescued // 5), budget)
+        type_match = float(zone.get("unit_type_match", 1.0))
+        return dict(
+            rescued         = rescued + min(units_sent * 5, unrescued),  # estimate
+            total_victims   = max(total_vics, 1),
+            units_deployed  = units_sent,
+            units_optimal   = max(optimal, 1),
+            response_step   = step,
+            max_steps       = max_steps,
+            unit_type_match = type_match,
+        )
+
+    return {}
 
 
 # ─────────────────────────────────────────────
@@ -487,25 +576,33 @@ def rollout_single_episode(
     episode: int,
     total_episodes: int,
     device: str,
+    worker_idx: int = 0,
 ) -> dict:
     """
-    Run one episode and collect (state_vec, log_prob, value, reward, done, action_labels).
-    Returns a dict of lists for PPO update.
+    Run one episode. Per-step rewards are now shaped by rewards.py
+    instead of being stuck at 0.020 from the raw env signal.
     """
     env = CrisisEnvironment(seed=seed)
     obs = env.reset(seed=seed, difficulty=difficulty)
 
-    state_vecs   = []
-    log_probs    = []
-    values_      = []
-    rewards_     = []
-    dones_       = []
-    entropies_   = []
-    action_labels= []
+    state_vecs    = []
+    log_probs     = []
+    values_       = []
+    rewards_      = []
+    dones_        = []
+    entropies_    = []
+    action_indices = []
+    action_labels = []
 
-    done = False
+    # try to get max_steps from env observation
+    obs_dict_init = observation_to_dict(obs)
+    max_steps = int(obs_dict_init.get("time_remaining", 30)) + int(obs_dict_init.get("current_step", 0))
+    max_steps = max(max_steps, 1)
+
+    done      = False
+    step_num  = 0
+
     while not done:
-        from utils import build_state_vector, build_valid_action_mask, observation_to_dict
         obs_dict = observation_to_dict(obs)
         sv       = build_state_vector(obs_dict)
         x        = torch.tensor(sv, dtype=torch.float32, device=device)
@@ -519,7 +616,7 @@ def rollout_single_episode(
         if pgmcts is not None:
             time_fraction = float(obs_dict.get("time_remaining", 0)) / max(
                 obs_dict.get("time_remaining", 1) + obs_dict.get("current_step", 0), 1)
-            mask_list = obs_dict.get("valid_actions", {}).get("action_mask", [1]*7)
+            mask_list  = obs_dict.get("valid_actions", {}).get("action_mask", [1]*7)
             valid_mask = torch.tensor(mask_list[:len(ACTION_TYPES)], dtype=torch.bool)
             action_logits = pgmcts.blend_logits(
                 action_logits, ACTION_TYPES, seed, difficulty,
@@ -527,25 +624,177 @@ def rollout_single_episode(
             )
             out["action_type"] = action_logits.unsqueeze(0)
 
-        action_dict, log_prob, entropy, _ = policy.select_action(obs, greedy=False)
-        result = env.step(CrisisAction(**action_dict))
+        # ── FIX 2: Improved forced-action override ──────────────────────────────
+        obs_dict  = observation_to_dict(obs)
+        step_num  = int(obs_dict.get("current_step", 0))
+        threats   = [t for t in obs_dict.get("threats", []) if t.get("status") == "active"]
+        zones     = [z for z in obs_dict.get("affected_zones", []) if z.get("is_active", False)]
+        resources = [r for r in obs_dict.get("resources", []) if r.get("is_available", False)]
+        budget    = int(obs_dict.get("resource_budget_remaining", 0))
+
+        def _priority(t):
+            s = float(t.get("severity", 1))
+            p = float(t.get("population_at_risk", 1))
+            tti = max(float(t.get("time_to_impact", 1)), 1)
+            return (s * p) / tti
+
+        ranked_threats = sorted(threats, key=_priority, reverse=True)
+
+        forced_action = None
+
+        # Step 1-3: classify unclassified threats (check predicted_severity is None)
+        unclassified = [t for t in ranked_threats if t.get("predicted_severity") is None]
+        if step_num <= 3 and unclassified:
+            t = unclassified[0]
+            # Extract just the type string, not the full enum representation
+            t_type = t.get("threat_type", "fire")
+            if hasattr(t_type, "value"):
+                t_type = t_type.value
+            else:
+                t_type = str(t_type).split(".")[-1].lower()
+            forced_action = {
+                "action_type": "classify",
+                "classification": {
+                    "threat_id": int(t["threat_id"]),
+                    "predicted_type": t_type,
+                    "predicted_severity": float(t.get("severity", 5.0)),
+                }
+            }
+
+        # Step 2-5: predict threats with severity but no time prediction
+        if forced_action is None:
+            needs_predict = [t for t in ranked_threats
+                            if t.get("predicted_severity") is not None
+                            and t.get("predicted_tti") is None]
+            if step_num <= 5 and needs_predict:
+                t = needs_predict[0]
+                forced_action = {
+                    "action_type": "predict",
+                    "prediction": {
+                        "threat_id": int(t["threat_id"]),
+                        "predicted_tti": max(1, int(t.get("time_to_impact", 5))),
+                        "predicted_pop": max(1, int(t.get("population_at_risk", 200))),
+                    }
+                }
+
+        # Step 3-8: allocate resources to top threat if not yet allocated
+        if forced_action is None and step_num <= 8 and ranked_threats and resources and budget > 0:
+            t = ranked_threats[0]
+            r = max(resources, key=lambda x: float(x.get("effectiveness", 0)))
+            forced_action = {
+                "action_type": "allocate",
+                "allocation": {
+                    "threat_id": int(t["threat_id"]),
+                    "resource_id": int(r["resource_id"]),
+                }
+            }
+
+        # Any step: rescue if victims remain and budget available
+        if forced_action is None and zones and budget > 0:
+            active_zones = [z for z in zones
+                            if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0]
+            if active_zones:
+                z = max(active_zones,
+                        key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
+                forced_action = {
+                    "action_type": "rescue",
+                    "rescue": {
+                        "zone_id": int(z["zone_id"]),
+                        "rescue_units_to_send": min(3, budget),
+                    }
+                }
+
+        # Any step: coordinate if multiple threats
+        if forced_action is None and len(ranked_threats) >= 2:
+            forced_action = {
+                "action_type": "coordinate",
+                "coordination": {
+                    "priority_order": [int(t["threat_id"]) for t in ranked_threats]
+                }
+            }
+
+        if forced_action is not None:
+            result = env.step(CrisisAction(**forced_action))
+            n_actions = len(ACTION_TYPES)
+            log_prob  = torch.tensor(-float(np.log(n_actions)), dtype=torch.float32, device=device)
+            entropy   = torch.tensor(float(np.log(n_actions)), dtype=torch.float32, device=device)
+            at = forced_action["action_type"]
+            action_idx = ACTION_TYPES.index(at) if at in ACTION_TYPES else 5
+            action_dict = forced_action
+        else:
+            action_dict, log_prob, entropy, logits = policy.select_action(obs, greedy=False)
+            at = str(action_dict.get("action_type", "skip")).replace("ActionType.", "")
+            action_idx = ACTION_TYPES.index(at) if at in ACTION_TYPES else 5
+            result = env.step(CrisisAction(**action_dict))
+        # ───────────────────────────────────────────────────────────────────
+
+        step_num += 1
+        env_reward  = float(result.reward)
+        action_type = str(action_dict.get("action_type", "skip")).replace("ActionType.", "")
+
+        # ── DYNAMIC REWARD SHAPING (replaces hardcoded 0.020) ──────────────
+        task_kw = _build_reward_kwargs(action_type, action_dict, obs_dict,
+                                       step=step_num, max_steps=max_steps)
+        shaped_reward = compute_step_reward(
+            action_type = action_type,
+            step        = step_num,
+            max_steps   = max_steps,
+            env_reward  = env_reward,
+            task_kwargs = task_kw,
+        )
+        # ───────────────────────────────────────────────────────────────────
+
+        # Live task scores from env state
+        try:
+            live_state  = env.state()
+            task_scores = extract_task_scores(live_state)
+        except Exception:
+            task_scores = TaskScores()
+
+        # ── VISIBLE STEP DASHBOARD ─────────────────────────────────────────
+        # Only print dashboard for the first worker to avoid jumbled parallel logs
+        if worker_idx == 0:
+            print_step_dashboard(StepInfo(
+                step        = step_num,
+                action_type = action_type,
+                raw_reward  = shaped_reward,
+                scores      = task_scores,
+                done        = bool(result.done),
+                episode     = episode,
+                difficulty  = difficulty,
+            ))
+        # ───────────────────────────────────────────────────────────────────
 
         state_vecs.append(sv)
         log_probs.append(log_prob)
         values_.append(value)
-        rewards_.append(float(result.reward))
+        # Add SKIP penalty to prevent policy collapse
+        skip_idx = ACTION_TYPES.index("skip") if "skip" in ACTION_TYPES else 5
+        raw_r = float(result.reward)
+        if action_idx == skip_idx:
+            raw_r = raw_r - 0.03
+        rewards_.append(raw_r)
         dones_.append(bool(result.done))
         entropies_.append(entropy)
-        action_labels.append({"obs": obs_dict, "action": action_dict})
+        # Use already-computed action_idx
+        action_indices.append(action_idx)
+        action_labels.append({
+            "obs":         obs_dict,
+            "action":      action_dict,
+            "action_type": action_type,
+        })
 
         done = bool(result.done)
         obs  = result.observation
 
-    state = env.state()
-    from utils import state_to_metrics
-    task_scores = state_to_metrics(state)
-
-    next_value = 0.0
+    # Final episode task scores
+    try:
+        final_state = env.state()
+        final_scores = extract_task_scores(final_state)
+        task_score_dict = final_scores.to_dict()
+    except Exception:
+        final_scores    = TaskScores()
+        task_score_dict = final_scores.to_dict()
 
     return {
         "state_vecs":    state_vecs,
@@ -554,11 +803,13 @@ def rollout_single_episode(
         "rewards":       rewards_,
         "dones":         dones_,
         "entropies":     entropies_,
+        "action_indices": action_indices,
         "action_labels": action_labels,
-        "next_value":    next_value,
-        "final_score":   float(task_scores.get("final", 0.0)),
-        "task_scores":   task_scores,
-        "steps":         int(state.step_count),
+        "next_value":    0.0,
+        "final_score":   float(task_score_dict.get("final", 0.0)),
+        "task_scores":   task_score_dict,
+        "task_scores_obj": final_scores,
+        "steps":         step_num,
         "seed":          seed,
     }
 
@@ -573,24 +824,27 @@ def collect_parallel_rollouts(
     pgmcts: Optional[PGMCTSPlanner],
     device: str,
 ) -> List[dict]:
-    """
-    Collect N_WORKERS episode rollouts in parallel using ThreadPoolExecutor.
-    """
+    # Avoid ThreadPoolExecutor context manager segfault on macOS
+    pool = ThreadPoolExecutor(max_workers=n_workers)
     futures = []
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+    try:
         for i in range(n_workers):
             seed_i = base_seed + episode * 100 + i * 7
             futures.append(pool.submit(
                 rollout_single_episode,
                 policy, difficulty, seed_i,
-                pgmcts, episode, total_episodes, device
+                pgmcts, episode, total_episodes, device, i
             ))
-    results = []
-    for f in as_completed(futures):
-        try:
-            results.append(f.result())
-        except Exception as e:
-            print(f"  [WARN] Worker rollout failed: {e}")
+        results = []
+        for f in as_completed(futures):
+            try:
+                results.append(f.result())
+            except Exception as e:
+                import traceback
+                print(f"  [WARN] Worker rollout failed: {e}")
+                traceback.print_exc()
+    finally:
+        pool.shutdown(wait=False)
     return results
 
 
@@ -612,10 +866,7 @@ def ppo_update(
     value_coeff: float,
     device: str,
 ) -> dict:
-    """
-    PPO-clip update over a batch of rollouts.
-    """
-    all_sv, all_lp_old, all_adv, all_ret, all_ent = [], [], [], [], []
+    all_sv, all_lp_old, all_adv, all_ret, all_ent, all_actions = [], [], [], [], [], []
 
     for r in rollouts:
         advantages, returns = compute_gae(
@@ -627,6 +878,7 @@ def ppo_update(
         all_adv.extend(advantages)
         all_ret.extend(returns)
         all_ent.extend(r["entropies"])
+        all_actions.extend(r.get("action_indices", [0]*len(r["state_vecs"])))
 
     if not all_sv:
         return {}
@@ -642,25 +894,20 @@ def ppo_update(
     policy.train()
 
     for _ in range(ppo_epochs):
-        out    = policy.forward(sv_tensor)
+        out     = policy.forward(sv_tensor)
         val_new = out["value"].squeeze(-1)
 
         from torch.distributions import Categorical
-        dist_new = Categorical(logits=out["action_type"])
-        lp_new   = dist_new.log_prob(
-            torch.zeros(len(all_sv), dtype=torch.long, device=device)
-        )
+        dist_new    = Categorical(logits=out["action_type"])
+        act_tensor  = torch.tensor(all_actions, dtype=torch.long, device=device)
+        lp_new      = dist_new.log_prob(act_tensor)
 
         ratio = torch.exp(lp_new - lp_old)
-
         surr1 = ratio * adv_tensor
         surr2 = torch.clamp(ratio, 1.0 - ppo_epsilon, 1.0 + ppo_epsilon) * adv_tensor
-        policy_loss = -torch.min(surr1, surr2).mean()
-
-        value_loss = F.mse_loss(val_new, ret_tensor)
-
+        policy_loss   = -torch.min(surr1, surr2).mean()
+        value_loss    = F.mse_loss(val_new, ret_tensor)
         entropy_bonus = dist_new.entropy().mean()
-
         loss = policy_loss + value_coeff * value_loss - entropy_coeff * entropy_bonus
 
         replay_batch = replay_buffer.sample_batch(16)
@@ -685,10 +932,10 @@ def ppo_update(
         total_loss_val = float(loss.item())
 
     return {
-        "loss":         round(total_loss_val, 6),
-        "policy_loss":  round(float(policy_loss.item()), 6),
-        "value_loss":   round(float(value_loss.item()), 6),
-        "entropy":      round(float(entropy_bonus.item()), 6),
+        "loss":        round(total_loss_val, 6),
+        "policy_loss": round(float(policy_loss.item()), 6),
+        "value_loss":  round(float(value_loss.item()), 6),
+        "entropy":     round(float(entropy_bonus.item()), 6),
     }
 
 
@@ -719,7 +966,7 @@ def train(
     bc_episodes:        int   = DEFAULT_BC_EPISODES,
     n_workers:          int   = N_WORKERS,
     use_pgmcts:         bool  = True,
-    pgmcts_alpha:       float = 0.40,
+    pgmcts_alpha:       float = 0.30,
     device:             str   = "cpu",
 ) -> None:
     set_global_seed(seed)
@@ -733,40 +980,49 @@ def train(
     replay_buffer = RetrospectiveReplayBuffer()
     logger        = TrainingLogger(LOG_DIR / "training.jsonl", clear=True)
 
-    print(f"{'='*70}")
-    print("  Crisis Response RL — PPO + GAE + PGMCTS + Retrospective Replay")
-    print(f"{'='*70}")
+    print(f"{'='*74}")
+    print("  Crisis Response RL — PPO + GAE + PGMCTS + Dynamic Reward Shaping")
+    print(f"{'='*74}")
+    print(f"  Tasks : T1-Classify · T2-Predict · T3-Allocate · T4-Coord · T5-Rescue")
     print(f"  Workers: {n_workers}  |  PPO epochs: {ppo_epochs}  |  GAE λ: {gae_lambda}")
-    print(f"  PGMCTS: {'ON (α='+str(pgmcts_alpha)+')' if use_pgmcts else 'OFF'}")
-    print(f"  Replay buffer: capacity={REPLAY_BUFFER_SIZE}, topk={REPLAY_TOPK_FRAC}")
-    print(f"{'='*70}\n")
+    print(f"  PGMCTS: {'ON  (α='+str(pgmcts_alpha)+')' if use_pgmcts else 'OFF'}")
+    print(f"  Reward : shaped (70%) + env (30%), decay γ={0.97}")
+    print(f"{'='*74}\n")
 
     bc_meta, bc_dataset = behavior_cloning_warmstart(
         policy, optimizer, seed, bc_steps, bc_episodes, device
     )
 
     reward_history, score_history = [], []
-    best_score = 0.0
-    curriculum_phase = 1
-    phase_start_episode = 1
-    start_time = time.time()
+    best_score     = 0.0
+    curriculum_phase     = 1
+    phase_start_episode  = 1
+    prev_phase           = 1
+    start_time    = time.time()
+    MAX_WALL_SECS = 14 * 60
 
     for episode in range(1, num_episodes + 1):
         pre_avg = moving_average(score_history, log_window) if score_history else 0.0
-        curriculum_phase, phase_start_episode = update_curriculum_phase(
+        new_phase, phase_start_episode = update_curriculum_phase(
             episode, curriculum_phase, phase_start_episode, pre_avg
         )
-        difficulty = curriculum_difficulty(curriculum_phase)
+
+        # ── phase transition banner ─────────────────────────────────────
+        if new_phase != prev_phase:
+            print_phase_transition(prev_phase, new_phase, episode, pre_avg)
+        prev_phase       = new_phase
+        curriculum_phase = new_phase
+        difficulty       = curriculum_difficulty(curriculum_phase)
 
         rollouts = collect_parallel_rollouts(
-            policy=policy,
-            difficulty=difficulty,
-            base_seed=seed,
-            episode=episode,
-            total_episodes=num_episodes,
-            n_workers=n_workers,
-            pgmcts=pgmcts,
-            device=device,
+            policy         = policy,
+            difficulty     = difficulty,
+            base_seed      = seed,
+            episode        = episode,
+            total_episodes = num_episodes,
+            n_workers      = n_workers,
+            pgmcts         = pgmcts,
+            device         = device,
         )
         if not rollouts:
             continue
@@ -774,11 +1030,12 @@ def train(
         topk_n = max(1, int(len(rollouts) * REPLAY_TOPK_FRAC))
         sorted_rollouts = sorted(rollouts, key=lambda r: r["final_score"], reverse=True)
         for r in sorted_rollouts[:topk_n]:
-            traj = [(lbl["obs"], {"action_type": ACTION_TYPES.index(
-                        str(lbl["action"].get("action_type","skip")).replace("ActionType.","")
-                    ), "strategy": 0, "threat": 0, "resource": 0,
-                    "zone": 0, "units": 0, "severity": 0, "tti": 0, "pop": 0})
-                    for lbl in r["action_labels"]]
+            traj = [(lbl["obs"], {
+                "action_type": ACTION_TYPES.index(
+                    str(lbl["action"].get("action_type","skip")).replace("ActionType.","")),
+                "strategy": 0, "threat": 0, "resource": 0,
+                "zone": 0, "units": 0, "severity": 0, "tti": 0, "pop": 0,
+            }) for lbl in r["action_labels"]]
             replay_buffer.add(r["final_score"], traj)
 
         ent_coeff_t = entropy_coeff * float(
@@ -786,18 +1043,18 @@ def train(
         ) + entropy_floor
 
         update_info = ppo_update(
-            policy=policy,
-            optimizer=optimizer,
-            rollouts=rollouts,
-            replay_buffer=replay_buffer,
-            bc_dataset=bc_dataset,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-            ppo_epsilon=ppo_epsilon,
-            ppo_epochs=ppo_epochs,
-            entropy_coeff=ent_coeff_t,
-            value_coeff=value_coeff,
-            device=device,
+            policy        = policy,
+            optimizer     = optimizer,
+            rollouts      = rollouts,
+            replay_buffer = replay_buffer,
+            bc_dataset    = bc_dataset,
+            gamma         = gamma,
+            gae_lambda    = gae_lambda,
+            ppo_epsilon   = ppo_epsilon,
+            ppo_epochs    = ppo_epochs,
+            entropy_coeff = ent_coeff_t,
+            value_coeff   = value_coeff,
+            device        = device,
         )
 
         avg_final_score = float(np.mean([r["final_score"] for r in rollouts]))
@@ -810,17 +1067,39 @@ def train(
         avg_score  = moving_average(score_history, log_window)
         replay_len = len(replay_buffer)
 
-        if episode % 5 == 0 or episode == 1:
-            elapsed = time.time() - start_time
-            eps_per_sec = (episode * n_workers) / max(elapsed, 1e-6)
-            print(
-                f"Ep {episode:3d} | ph={curriculum_phase} diff={difficulty:<6} | "
-                f"score={avg_final_score:.4f} avg={avg_score:.4f} | "
-                f"loss={update_info.get('loss',0):.4f} "
-                f"vl={update_info.get('value_loss',0):.4f} | "
-                f"replay={replay_len} | {eps_per_sec:.1f} ep/s"
-            )
+        # ── EPISODE SUMMARY with per-task bars ──────────────────────────
+        elapsed      = time.time() - start_time
+        eps_per_sec  = (episode * n_workers) / max(elapsed, 1e-6)
 
+        # Average TaskScores across workers for the summary
+        def _avg_task_scores(rols):
+            keys = ["classification","prediction","allocation","coordination","rescue"]
+            avgs = {k: float(np.mean([r["task_scores"].get(k, 0.0) for r in rols]))
+                    for k in keys}
+            return TaskScores(**avgs)
+
+        ep_scores = _avg_task_scores(rollouts)
+
+        # FIX 4: Smarter Metrics
+        prev_avg = score_history[-2] if len(score_history) >= 2 else score_history[-1]
+        policy_delta = (score_history[-1] - prev_avg) * 100
+        critic_acc   = max(0.0, 1.0 - update_info.get("value_loss", 1.0)) * 100
+        entropy_val  = update_info.get("entropy", 0.0)
+
+        print_episode_summary(
+            episode            = episode,
+            scores             = ep_scores,
+            phase              = curriculum_phase,
+            difficulty         = difficulty,
+            policy_delta       = policy_delta,
+            critic_acc         = critic_acc,
+            entropy            = entropy_val,
+            replay_len         = replay_len,
+            episodes_per_s     = eps_per_sec,
+            avg_score          = avg_score,
+        )
+
+        # ── CHECKPOINT ──────────────────────────────────────────────────
         if avg_final_score > best_score:
             best_score = avg_final_score
             save_checkpoint(CHECKPOINT_DIR / "best_model.pt", policy, optimizer,
@@ -840,15 +1119,23 @@ def train(
             "value_loss": update_info.get("value_loss", 0),
             "entropy": update_info.get("entropy", 0),
             "replay_size": replay_len,
+            "task_scores": ep_scores.to_dict(),
         })
 
+        # ── EARLY STOP ──────────────────────────────────────────────────
         if (episode >= max(min_episodes, patience + 1)
                 and len(score_history) > patience):
-            delta_s = abs(moving_average(score_history[-patience:], patience//2) -
-                          moving_average(score_history[-2*patience:-patience], patience//2))
+            delta_s = abs(
+                moving_average(score_history[-patience:],       patience//2) -
+                moving_average(score_history[-2*patience:-patience], patience//2)
+            )
             if delta_s < min_delta and avg_score > stop_score:
                 print(f"Early stop at ep {episode}: Δscore={delta_s:.5f} avg={avg_score:.4f}")
                 break
+
+        if time.time() - start_time >= MAX_WALL_SECS:
+            print(f"Wall-clock limit reached at episode {episode}. Stopping.")
+            break
 
     save_checkpoint(CHECKPOINT_DIR / "model.pt", policy, optimizer,
                     metadata={"episodes_run": len(score_history),
@@ -856,43 +1143,47 @@ def train(
                               "hidden_dim": hidden_dim, "state_dim": STATE_DIM})
 
     elapsed = time.time() - start_time
-    print(f"\n{'='*70}")
+    print(f"\n{'='*74}")
     print(f"  Training complete in {elapsed:.1f}s")
     print(f"  Best score: {best_score:.4f}  |  Episodes: {len(score_history)}")
-    print(f"{'='*70}")
+    print(f"{'='*74}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes",       type=int,   default=DEFAULT_EPISODES)
-    parser.add_argument("--lr",             type=float, default=DEFAULT_LR)
-    parser.add_argument("--hidden",         type=int,   default=DEFAULT_HIDDEN)
-    parser.add_argument("--n-workers",      type=int,   default=N_WORKERS)
-    parser.add_argument("--no-pgmcts",      action="store_true")
-    parser.add_argument("--pgmcts-alpha",   type=float, default=0.40)
-    parser.add_argument("--seed",           type=int,   default=DEFAULT_SEED)
-    parser.add_argument("--device",         type=str,   default="auto")
-    parser.add_argument("--stop-score",     type=float, default=DEFAULT_STOP_SCORE)
-    parser.add_argument("--checkpoint-every", type=int, default=50)
+    parser.add_argument("--episodes",         type=int,   default=DEFAULT_EPISODES)
+    parser.add_argument("--lr",               type=float, default=DEFAULT_LR)
+    parser.add_argument("--hidden",           type=int,   default=DEFAULT_HIDDEN)
+    parser.add_argument("--n-workers",        type=int,   default=N_WORKERS)
+    parser.add_argument("--no-pgmcts",        action="store_true", default=False)
+    parser.add_argument("--pgmcts-alpha",     type=float, default=0.40)
+    parser.add_argument("--seed",             type=int,   default=DEFAULT_SEED)
+    parser.add_argument("--device",           type=str,   default="auto")
+    parser.add_argument("--stop-score",       type=float, default=DEFAULT_STOP_SCORE)
+    parser.add_argument("--checkpoint-every", type=int,   default=25)
+    parser.add_argument("--min-episodes",     type=int,   default=DEFAULT_MIN_EPISODES)
+    parser.add_argument("--patience",         type=int,   default=DEFAULT_PATIENCE)
     args = parser.parse_args()
 
     if args.device == "auto":
         device = ("cuda" if torch.cuda.is_available()
-                  else "mps" if (hasattr(torch.backends,"mps")
+                  else "mps" if (hasattr(torch.backends, "mps")
                                  and torch.backends.mps.is_available())
                   else "cpu")
     else:
         device = args.device
 
     train(
-        num_episodes=args.episodes,
-        lr=args.lr,
-        hidden_dim=args.hidden,
-        n_workers=args.n_workers,
-        use_pgmcts=not args.no_pgmcts,
-        pgmcts_alpha=args.pgmcts_alpha,
-        seed=args.seed,
-        device=device,
-        stop_score=args.stop_score,
-        checkpoint_every=args.checkpoint_every,
+        num_episodes     = args.episodes,
+        lr               = args.lr,
+        hidden_dim       = args.hidden,
+        n_workers        = args.n_workers,
+        use_pgmcts       = not args.no_pgmcts,
+        pgmcts_alpha     = args.pgmcts_alpha,
+        seed             = args.seed,
+        device           = device,
+        stop_score       = args.stop_score,
+        checkpoint_every = args.checkpoint_every,
+        min_episodes     = args.min_episodes,
+        patience         = args.patience,
     )

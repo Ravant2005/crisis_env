@@ -1,14 +1,3 @@
-"""
-utils.py — RL infrastructure for training and evaluating agents against CrisisEnvironment.
-
-Provides:
-- Observation/state encoding for policy input
-- Action masking helpers
-- Action decoding/encoding
-- Baseline policy (intentionally imperfect) for comparison and BC warm-start
-- Logging/checkpoint helpers
-"""
-
 from __future__ import annotations
 
 import json
@@ -225,9 +214,41 @@ def build_valid_action_mask(observation: Any) -> Dict[str, Any]:
     obs = observation_to_dict(observation)
     provided = obs.get("valid_actions")
 
-    threats = sorted([t for t in obs.get("threats", []) if t.get("status") == "active"], key=lambda t: int(t["threat_id"]))
-    resources = sorted([r for r in obs.get("resources", []) if r.get("is_available", False)], key=lambda r: int(r["resource_id"]))
-    zones = sorted([z for z in obs.get("affected_zones", []) if z.get("is_active", False)], key=lambda z: int(z["zone_id"]))
+    threat_ids = []
+    for t_raw in obs.get("threats", []):
+        tid_raw = t_raw.get("threat_id")
+        if isinstance(tid_raw, (int, str)):
+            try:
+                tid = int(tid_raw)
+                if t_raw.get("status") == "active":
+                    threat_ids.append(tid)
+            except (ValueError, TypeError):
+                pass
+    threats = [t for t in obs.get("threats", []) if t.get("threat_id") in threat_ids]
+
+    resource_ids = []
+    for r_raw in obs.get("resources", []):
+        rid_raw = r_raw.get("resource_id")
+        if isinstance(rid_raw, (int, str)):
+            try:
+                rid = int(rid_raw)
+                if r_raw.get("is_available", False):
+                    resource_ids.append(rid)
+            except (ValueError, TypeError):
+                pass
+    resources = [r for r in obs.get("resources", []) if r.get("resource_id") in resource_ids]
+
+    zone_ids = []
+    for z_raw in obs.get("affected_zones", []):
+        zid_raw = z_raw.get("zone_id")
+        if isinstance(zid_raw, (int, str)):
+            try:
+                zid = int(zid_raw)
+                if z_raw.get("is_active", False):
+                    zone_ids.append(zid)
+            except (ValueError, TypeError):
+                pass
+    zones = [z for z in obs.get("affected_zones", []) if z.get("zone_id") in zone_ids]
 
     budget_remaining = int(obs.get("resource_budget_remaining", 0))
 
@@ -247,9 +268,9 @@ def build_valid_action_mask(observation: Any) -> Dict[str, Any]:
         }
         raw_action_mask = [action_enabled[a] for a in ACTION_TYPES]
 
-    threat_ids = [int(t["threat_id"]) for t in threats[:MAX_THREATS]]
-    resource_ids = [int(r["resource_id"]) for r in resources[:MAX_RESOURCES]]
-    zone_ids = [int(z["zone_id"]) for z in zones[:MAX_ZONES]]
+    threat_ids = [int(t["threat_id"]) for t in threats[:MAX_THREATS] if isinstance(t.get("threat_id"), (int, str))]
+    resource_ids = [int(r["resource_id"]) for r in resources[:MAX_RESOURCES] if isinstance(r.get("resource_id"), (int, str))]
+    zone_ids = [int(z["zone_id"]) for z in zones[:MAX_ZONES] if isinstance(z.get("zone_id"), (int, str))]
 
     threat_mask = [1] * len(threat_ids) + [0] * (MAX_THREATS - len(threat_ids))
     resource_mask = [1] * len(resource_ids) + [0] * (MAX_RESOURCES - len(resource_ids))
@@ -543,14 +564,16 @@ def encode_action_labels(action_dict: Dict[str, Any], obs_dict: Dict[str, Any]) 
 
     if action_type == "classify" and action_dict.get("classification"):
         payload = action_dict["classification"]
-        tid = int(payload.get("threat_id", threat_ids[0] if threat_ids else 1))
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
         if tid in threat_ids:
             labels["threat"] = threat_ids.index(tid)
         labels["severity"] = int(np.clip(round(float(payload.get("predicted_severity", 5.0)) / 10.0 * 9), 0, 9))
 
     elif action_type == "predict" and action_dict.get("prediction"):
         payload = action_dict["prediction"]
-        tid = int(payload.get("threat_id", threat_ids[0] if threat_ids else 1))
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
         if tid in threat_ids:
             labels["threat"] = threat_ids.index(tid)
         labels["tti"] = int(np.clip(round(float(payload.get("predicted_tti", 0)) / max(TOTAL_STEPS, 1) * 19), 0, 19))
@@ -558,8 +581,10 @@ def encode_action_labels(action_dict: Dict[str, Any], obs_dict: Dict[str, Any]) 
 
     elif action_type == "allocate" and action_dict.get("allocation"):
         payload = action_dict["allocation"]
-        tid = int(payload.get("threat_id", threat_ids[0] if threat_ids else 1))
-        rid = int(payload.get("resource_id", resource_ids[0] if resource_ids else 1))
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
+        rid_raw = payload.get("resource_id")
+        rid = int(rid_raw) if isinstance(rid_raw, (int, str)) else (resource_ids[0] if resource_ids else 1)
         if tid in threat_ids:
             labels["threat"] = threat_ids.index(tid)
         if rid in resource_ids:
@@ -575,7 +600,8 @@ def encode_action_labels(action_dict: Dict[str, Any], obs_dict: Dict[str, Any]) 
 
     elif action_type == "delay" and action_dict.get("delay"):
         payload = action_dict["delay"]
-        tid = int(payload.get("threat_id", threat_ids[0] if threat_ids else 1))
+        tid_raw = payload.get("threat_id")
+        tid = int(tid_raw) if isinstance(tid_raw, (int, str)) else (threat_ids[0] if threat_ids else 1)
         if tid in threat_ids:
             labels["threat"] = threat_ids.index(tid)
         labels["units"] = int(np.clip((int(payload.get("delay_steps", 1)) - 1) * 2, 0, MAX_RESCUE_UNITS - 1))
@@ -861,3 +887,4 @@ def collect_baseline_dataset(
             done = bool(result.done)
 
     return dataset
+

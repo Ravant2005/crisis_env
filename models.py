@@ -239,6 +239,10 @@ class CrisisState(BaseModel):
     cumulative_reward: float = Field(default=0.0)
     done: bool = Field(default=False)
 
+    task_scores: Dict[str, float] = Field(default_factory=dict)
+    efficiency: Dict[str, float] = Field(default_factory=dict)
+    progress: Dict[str, Any] = Field(default_factory=dict)
+
     class Config:
         use_enum_values = True
 

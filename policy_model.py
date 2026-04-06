@@ -41,25 +41,25 @@ class PolicyShape:
 
 STRATEGY_BIAS: Dict[str, Dict[str, float]] = {
     "rescue_first": {
-        "rescue": 0.55,
-        "allocate": 0.35,
-        "delay": 0.10,
-        "predict": -0.10,
-        "classify": -0.08,
+        "rescue":     0.40,
+        "allocate":   0.25,
+        "predict":   0.15,
+        "classify":  0.10,
+        "coordinate": 0.05,
     },
     "predict_first": {
-        "predict": 0.50,
-        "classify": 0.35,
+        "predict":    0.45,
+        "classify":   0.30,
         "coordinate": 0.20,
-        "allocate": -0.05,
-        "rescue": -0.10,
+        "allocate":   0.10,
+        "rescue":    0.05,
     },
     "balanced": {
-        "coordinate": 0.20,
-        "allocate": 0.15,
-        "rescue": 0.15,
-        "predict": 0.12,
-        "classify": 0.12,
+        "classify":   0.18,
+        "predict":   0.18,
+        "allocate":  0.18,
+        "coordinate": 0.18,
+        "rescue":    0.18,
     },
 }
 
@@ -172,7 +172,9 @@ class PolicyNetwork(nn.Module):
         }.get(zone, set())
 
         def score(r: Dict[str, Any]) -> float:
-            return float(r.get("effectiveness", 0.0)) + (0.22 if r.get("resource_type") in affinity else 0.0)
+            base = float(r.get("effectiveness", 0.0))
+            zone_bonus = 0.5 if r.get("resource_type") in affinity else 0.0
+            return base + zone_bonus  # BOOSTED +0.5 zone match
 
         return max(resources, key=score)
 
@@ -206,13 +208,29 @@ class PolicyNetwork(nn.Module):
         if can("predict"):
             for threat in ranked:
                 if threat.get("predicted_tti") is None or threat.get("predicted_pop") is None:
+                    # Defensive: ensure numeric types
+                    tid = threat.get("threat_id")
+                    tti = threat.get("time_to_impact", 0)
+                    pop = threat.get("population_at_risk", 0)
+                    try:
+                        tid_val = int(tid) if isinstance(tid, (int, float)) else (int(tid) if isinstance(tid, str) else 1)
+                    except (ValueError, TypeError):
+                        tid_val = 1
+                    try:
+                        tti_val = int(max(0, tti)) if isinstance(tti, (int, float)) else (int(tti) if isinstance(tti, str) else 0)
+                    except (ValueError, TypeError):
+                        tti_val = 0
+                    try:
+                        pop_val = int(max(0, pop)) if isinstance(pop, (int, float)) else (int(pop) if isinstance(pop, str) else 0)
+                    except (ValueError, TypeError):
+                        pop_val = 0
                     return {
                         "action_type": "predict",
                         "strategy": strategy,
                         "prediction": {
-                            "threat_id": int(threat["threat_id"]),
-                            "predicted_tti": int(max(0, threat.get("time_to_impact", 0))),
-                            "predicted_pop": int(max(0, threat.get("population_at_risk", 0))),
+                            "threat_id": tid_val,
+                            "predicted_tti": tti_val,
+                            "predicted_pop": pop_val,
                         },
                     }
 
@@ -237,7 +255,16 @@ class PolicyNetwork(nn.Module):
 
         # 4) Allocate before impact for imminent unassigned active threats.
         if can("allocate") and ranked and resources and budget > 0:
-            imminent = [t for t in ranked if int(t.get("time_to_impact", 99)) <= 5 and t.get("assigned_resource") is None]
+            # Defensive: handle potential non-numeric time_to_impact
+            imminent = []
+            for t in ranked:
+                try:
+                    tti = t.get("time_to_impact", 99)
+                    if isinstance(tti, (int, float)):
+                        if int(tti) <= 5 and t.get("assigned_resource") is None:
+                            imminent.append(t)
+                except (ValueError, TypeError):
+                    pass
             if imminent:
                 target = imminent[0]
                 resource = self._best_resource_for_threat(target, resources)
@@ -285,7 +312,15 @@ class PolicyNetwork(nn.Module):
 
         # 8) Delay near-term critical threat if still active.
         if can("delay"):
-            imminent = [t for t in ranked if int(t.get("time_to_impact", 99)) <= 2]
+            # Defensive: handle potential non-numeric time_to_impact
+            imminent = []
+            for t in ranked:
+                try:
+                    tti = t.get("time_to_impact", 99)
+                    if isinstance(tti, (int, float)) and int(tti) <= 2:
+                        imminent.append(t)
+                except (ValueError, TypeError):
+                    pass
             if imminent:
                 return {
                     "action_type": "delay",

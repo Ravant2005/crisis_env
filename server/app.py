@@ -232,16 +232,15 @@ async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
     env   = _get_env(session_id)
     state = env.state()
     return {
-        "task_scores": {
-            "classification": state.classification_score,
-            "prediction":     state.prediction_score,
-            "allocation":     state.allocation_score,
-            "coordination":   state.coordination_score,
-            "rescue":         state.rescue_score,
-        },
-        "final_score":       state.final_score,
-        "episode_id":        state.episode_id,
-        "done":              state.done,
+        "classification": round(state.classification_score, 4),
+        "prediction":     round(state.prediction_score,     4),
+        "allocation":     round(state.allocation_score,     4),
+        "coordination":   round(state.coordination_score,   4),
+        "rescue":         round(state.rescue_score,         4),
+        "final":          round(state.final_score,          4),
+        "final_score":    round(state.final_score,          4),
+        "episode_id":     state.episode_id,
+        "done":           state.done,
     }
 
 

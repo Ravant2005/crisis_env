@@ -1,3 +1,17 @@
+---
+title: AI Crisis Response OpenEnv
+emoji: 🚨
+colorFrom: red
+colorTo: orange
+sdk: docker
+app_port: 8000
+tags:
+  - openenv
+  - reinforcement-learning
+  - crisis-management
+pinned: false
+---
+
 <div align="center">
 
 # 🚨 AI Crisis Response & Rescue Coordination
@@ -56,7 +70,7 @@ Once a threat is classified, the next question is: **when will it hit, and how m
 The agent must predict TTI in steps and the number of people at risk. Both predictions are evaluated against the true hidden state. The grader computes a normalised composite error:
 
 ```
-prediction_score = 1 - (0.5 × normalised_TTI_error + 0.5 × normalised_population_error)
+prediction_score = 1.0 - 0.5 × normalised_TTI_error - 0.5 × normalised_population_error
 ```
 
 The normalised TTI error is `|predicted_TTI - true_TTI| / episode_length`. The normalised population error is `|predicted_pop - true_pop| / true_pop`. An agent that predicts both perfectly scores 1.0; an agent that is off by one step on TTI and 10% on population still scores above 0.85. Partial credit exists for good-but-not-perfect predictions.
@@ -71,10 +85,11 @@ The environment contains 8 resource units across 7 types: military units, coast 
 
 The allocation grader computes:
 ```
-allocation_score = mean(effectiveness + zone_affinity_bonus) × budget_efficiency − waste_penalty
+allocation_score = 0.50 × effectiveness + 0.30 × zone_affinity + 0.20 × budget_efficiency − waste_penalty
 ```
+where `zone_affinity` is a ratio of resources deployed in their affinity zones and `budget_efficiency` penalizes overspending.
 
-The global resource budget (4–6 units per episode depending on difficulty) creates a genuine combinatorial optimisation problem. The agent cannot deploy every resource to every threat; it must solve a constraint-satisfaction problem under uncertainty. Deploying a low-quality or zone-mismatched resource not only wastes budget — it increases `resource_waste_events` which feeds directly into a penalty term in the reward function.
+The global resource budget (8–10 units per episode depending on difficulty) creates a genuine combinatorial optimisation problem. The agent cannot deploy every resource to every threat; it must solve a constraint-satisfaction problem under uncertainty. Deploying a low-quality or zone-mismatched resource not only wastes budget — it increases `resource_waste_events` which feeds directly into a penalty term in the reward function.
 
 **Real-world analogue:** Three simultaneous incidents: an explosion at a train station (urban), a fire at a port warehouse (maritime), and a drone alert over a civilian district (urban). The operations centre has 5 deployable units. Sending the SWAT team to the drone alert, the fire brigade to the explosion, and the coast guard to the port is correct. Sending the coast guard to the explosion and the SWAT team to the port is wrong — same number of assets deployed, far worse outcome. The agent learns this distinction through the zone-affinity reward signal.
 
@@ -102,12 +117,12 @@ The rescue task activates when a threat's TTI reaches zero and it transitions to
 
 The rescue grader computes a three-component score:
 ```
-rescue_score = 0.55 × (victims_saved / total_victims)
+rescue_score = 0.60 × (victims_saved / total_victims)
              + 0.25 × speed_score
-             + 0.20 × resource_efficiency
+             + 0.15 × resource_efficiency
 ```
 
-`speed_score` is `1 - (average_rescue_step / episode_length)` — it rewards agents that rescue early rather than late. `resource_efficiency` is `victims_saved / (units_deployed × 14)` — it rewards agents that extract maximum survival from each unit deployed. When all threats are prevented before impact (through good allocation and coordination), rescue scores a baseline of `0.55 + 0.45 × (casualties_prevented / total_population)`, rewarding preventive excellence even in the absence of post-impact rescue activity.
+`speed_score` is `1 - (average_rescue_step / episode_length)` — it rewards agents that rescue early rather than late. `resource_efficiency` is `victims_saved / (units_deployed × 14)` — it rewards agents that extract maximum survival from each unit deployed. When all threats are prevented before impact (through good allocation and coordination), rescue scores a baseline of `0.60 + 0.40 × (casualties_prevented / total_population)`, rewarding preventive excellence even in the absence of post-impact rescue activity.
 
 **Real-world analogue:** After an explosion at a civilian train station with 900 people at risk, the operations centre must decide in real time: how many ambulances, how many fire engines, how many USAR (Urban Search and Rescue) teams, deployed to which specific zones of the impact area, in what sequence. This task trains agents to make exactly those decisions under resource constraints, with speed as a core scoring criterion.
 
@@ -161,9 +176,9 @@ Each of the five tasks has been designed to meet three criteria that distinguish
 
 **Multi-Threat Coordination** uses a weighted rank-correlation score rather than a simple accuracy measure. Position 1 in the priority order carries the highest weight; position 4 carries the lowest. This is not an arbitrary design choice — it reflects the real operational principle that getting the most urgent threat first is the highest-stakes decision, while the relative ordering of two low-priority threats matters much less. The grader additionally applies a `wrong_priority_penalty` of 0.04 per incorrect top-rank event, creating a strong training signal specifically around the most consequential coordination failure mode.
 
-**Rescue Optimisation** is the only grader that simultaneously evaluates three distinct aspects of the same action: how many people were saved, how quickly, and with how efficiently. The 55/25/20 weighting prioritises lives saved over speed, and speed over efficiency — a deliberate ethical choice that matches real emergency management doctrine (save the most people first, worry about resource efficiency second). The grader also handles the edge case where good coordination prevents all threats from ever impacting: it rewards preventive excellence with a score of 0.55 + 0.45 × casualty_prevention_rate, so agents that contain every threat before impact are not penalised for having no victims to rescue.
+**Rescue Optimisation** is the only grader that simultaneously evaluates three distinct aspects of the same action: how many people were saved, how quickly, and with how efficiently. The 60/25/15 weighting prioritises lives saved over speed, and speed over efficiency — a deliberate ethical choice that matches real emergency management doctrine (save the most people first, worry about resource efficiency second). The grader also handles the edge case where good coordination prevents all threats from ever impacting: it rewards preventive excellence with a score of 0.60 + 0.40 × casualty_prevention_rate, so agents that contain every threat before impact are not penalised for having no victims to rescue.
 
-The difficulty progression is genuine, not cosmetic. Easy (2 threats, noise 0.08, budget 6, 22 steps) can be solved well by a simple heuristic agent. Medium (3 threats, noise 0.16, budget 5, 26 steps) requires the agent to reason about zone affinity and priority ordering. Hard (4 threats, noise 0.24, budget 4, 30 steps) with 23% per-step escalation probability and 20% secondary spread probability creates a dynamic environment where the correct action at step 1 may be wrong at step 10, and where the agent must genuinely reason under deep uncertainty. Frontier LLM agents (GPT-4o class) achieve 0.60–0.70 on hard difficulty; a well-trained RL policy achieves 0.85–0.92.
+The difficulty progression is genuine, not cosmetic. Easy (2 threats, noise 0.08, budget 10, 22 steps) can be solved well by a simple heuristic agent. Medium (3 threats, noise 0.16, budget 9, 26 steps) requires the agent to reason about zone affinity and priority ordering. Hard (4 threats, noise 0.24, budget 8, 30 steps) with 23% per-step escalation probability and 20% secondary spread probability creates a dynamic environment where the correct action at step 1 may be wrong at step 10, and where the agent must genuinely reason under deep uncertainty. Frontier LLM agents (GPT-4o class) achieve 0.60–0.70 on hard difficulty; a well-trained RL policy achieves 0.85–0.92.
 
 ---
 
@@ -180,17 +195,17 @@ The simulation engine in `server/environment.py` is built around four principles
 **Reward shaping.** The step reward is dense throughout the episode, not just at termination. It is composed of six terms:
 
 ```
-step_reward = 0.4 × step_task_progress
-            + 0.3 × rescue_progress
-            + 0.2 × efficiency_gain
-            − 0.1 × time_penalty
-            − 0.2 × invalid_action_penalty
-            − 0.15 × resource_waste_penalty
+step_reward = task_progress × 1.20
+            + handler_bonus
+            + 0.06 × budget_efficiency
+            − 0.08 × time_fraction
+            − 0.12 × invalid_action_penalty
+            − 0.10 × resource_waste_penalty
 ```
 
 `step_task_progress` captures the delta in all five grader scores from the previous step, so any improvement in any task produces a positive reward signal immediately rather than at episode end. `rescue_progress` activates at termination and provides a strong terminal signal proportional to lives saved. `time_penalty` grows linearly with episode step, creating genuine time pressure — not a fixed deadline, but a gradually increasing cost for delay. `invalid_action_penalty` fires whenever the agent attempts an action that the action mask marks as invalid (e.g. allocating when budget is zero), providing a direct learning signal for action masking compliance. `resource_waste_penalty` is proportional to accumulated waste events, teaching the agent to avoid low-quality or zone-mismatched allocations.
 
-The `TASK_IMPORTANCE` weighting `{rescue: 1.8, allocation: 1.6, coordination: 1.5, classification: 1.0, prediction: 1.0}` upweights the operational tasks relative to the analytical tasks, reflecting the real-world priority that saving lives matters more than correctly labelling the threat that causes them. The `_adaptive_task_weights` function automatically upweights tasks where the agent is currently performing worst, creating a curriculum-within-episode that keeps gradient signal strong throughout training.
+The final score weighting `{rescue: 0.25, allocation: 0.20, coordination: 0.15, classification: 0.20, prediction: 0.20}` upweights the operational tasks relative to the analytical tasks, reflecting the real-world priority that saving lives matters more than correctly labelling the threat that causes them. The `_adaptive_task_weights` function automatically upweights tasks where the agent is currently performing worst, creating a curriculum-within-episode that keeps gradient signal strong throughout training.
 
 **Episode boundaries.** An episode ends when either all active threats have reached a terminal status (contained, resolved, or fully rescued after impact) or the step count reaches the difficulty-appropriate maximum. Both conditions are meaningful: the first rewards agents that efficiently neutralise all threats; the second creates a time limit that prevents episodes from extending indefinitely when the agent repeatedly delays. The episode is not artificially truncated — if the agent fully handles all threats by step 15 of a 30-step hard episode, it ends early, and the unused steps are counted as time efficiency in the final score.
 
@@ -298,7 +313,7 @@ python validate_env.py
 SEED=42 python inference.py
 
 # Train
-python train.py --episodes 300 --n-workers 8 --device auto
+python train.py
 ```
 
 **Docker:**
@@ -342,11 +357,11 @@ The deterministic heuristic baseline follows: classify all → predict all → c
 | Task | Score |
 |------|-------|
 | Classification | 1.0000 |
-| Prediction | 0.8234 |
-| Allocation | 0.7891 |
+| Prediction | 0.0000 |
+| Allocation | 0.0000 |
 | Coordination | 1.0000 |
 | Rescue | 0.8198 |
-| **Final** | **0.8847** |
+| **Final** | **0.5640** |
 
 The baseline deliberately does not use the trained RL policy — it uses a fixed rule-based pipeline to demonstrate reproducible scores from a non-learned agent. The trained PPO agent achieves 0.90–0.94 on medium difficulty across 50 random seeds.
 
