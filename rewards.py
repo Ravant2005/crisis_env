@@ -345,7 +345,12 @@ def reward_allocation(
 
     proximity = 0.10 if nearest_chosen else 0.0
 
-    return _clamp(type_score + intercept_score + efficiency + proximity)
+    base_score = type_score + intercept_score + efficiency + proximity
+    
+    # ALLOCATION QUALITY BOOST - stronger to stabilize allocation
+    quality_bonus = 0.20 * (_clamp(type_score / 0.45) * 0.5 + _clamp(intercept_prob) * 0.5)
+    
+    return _clamp(base_score + quality_bonus)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,12 +495,38 @@ def compute_step_reward(
     Productive task actions get: 70% shaped + 30% raw, floored at BASE_REWARD.
     Rescue actions use RESCUE_BASE floor (slightly higher) to encourage more
     rescue steps in the late game.
+    
+    FIX v4: Strong allocation incentives + over-classify penalty
     """
     if action_type == "skip":
         return SKIP_PENALTY
     if action_type == "delay":
         return DELAY_PENALTY
+    
+    timing_penalty = 0.0
+    
+    # OVER-CLASSIFY PENALTY - after step 6, penalize extra classify
+    if action_type == "classify" and step > 6:
+        timing_penalty -= 0.08
+    
+    # ALLOCATION TIMING PRESSURE - encourage early allocation
+    if action_type == "allocate":
+        # Get allocation quality from task_kwargs if available
+        alloc_quality = 0.8  # default good quality
+        if task_kwargs:
+            rt = task_kwargs.get("resource_type", "")
+            tt = task_kwargs.get("threat_type", "")
+            intercept = task_kwargs.get("intercept_prob", 0.5)
+            # Estimate quality
+            type_match = 0.4 if any(c in rt for c in tt.split()) or any(c in rt for c in ["fire", "water", "medical", "rescue"]) else 0.2
+            alloc_quality = type_match * 0.5 + intercept * 0.5
+        
+        # Hard stabilize allocation (Fix 1)
+        timing_penalty += 0.15 * alloc_quality
+        if alloc_quality < 0.8:
+            timing_penalty -= 0.25
 
+    
     if task_kwargs is None:
         task_kwargs = {}
 
@@ -520,7 +551,7 @@ def compute_step_reward(
     floor   = RESCUE_BASE if action_type == "rescue" else BASE_REWARD
     shaped  = max(floor, shaped * decay)
     blended = SHAPED_BLEND * shaped + (1.0 - SHAPED_BLEND) * float(env_reward)
-    return max(0.0, blended)
+    return max(0.0, blended + timing_penalty)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

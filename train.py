@@ -64,9 +64,9 @@ DEFAULT_GAE_LAMBDA      = 0.95
 DEFAULT_PPO_EPSILON     = 0.10
 DEFAULT_PPO_EPOCHS      = 3
 DEFAULT_VALUE_COEFF     = 1.0
-DEFAULT_ENTROPY_COEFF   = 0.01
-DEFAULT_ENTROPY_DECAY   = 0.01
-DEFAULT_ENTROPY_FLOOR   = 0.05
+DEFAULT_ENTROPY_COEFF   = 0.003  # Lower for stable allocation
+DEFAULT_ENTROPY_DECAY   = 0.015  # Faster decay
+DEFAULT_ENTROPY_FLOOR   = 0.03  # Lower floor for consistency
 DEFAULT_HIDDEN          = 256
 DEFAULT_SEED            = 42
 DEFAULT_LOG_WINDOW      = 15
@@ -696,8 +696,8 @@ def rollout_single_episode(
         # ── FORCED ACTION PIPELINE ────────────────────────────────────────
         forced_action = None
 
-        # Stage 1: Classify all unclassified threats
-        if unclassified:
+        # Stage 1: Classify FIRST unclassified threat (FAST - only 1, then move on)
+        if unclassified and not coordinated_done:
             t = unclassified[0]
             t_type = t.get("threat_type", "fire")
             if hasattr(t_type, "value"):
@@ -713,8 +713,8 @@ def rollout_single_episode(
                 },
             }
 
-        # Stage 2: Predict all classified-but-not-predicted threats
-        if forced_action is None and unpredicted:
+        # Stage 2: FAST Predict - only 1, then immediately move to coordinate
+        if forced_action is None and unpredicted and not coordinated_done:
             t = unpredicted[0]
             forced_action = {
                 "action_type": "predict",
@@ -725,7 +725,7 @@ def rollout_single_episode(
                 },
             }
 
-        # FORCE early coordination (step 4–6 ideal)
+        # FORCE EARLY coordination (step 4-6 critical for score)
         if forced_action is None and not coordinated_done and step_num <= 6 and len(coord_candidates) >= 1:
             ranked_for_coord = sorted(coord_candidates, key=_priority, reverse=True)
             forced_action = {
@@ -747,7 +747,7 @@ def rollout_single_episode(
                 },
             }
 
-        # Stage 4: Allocate any unallocated threats (FIX: use local set)
+        # Stage 4: Allocate - IMMEDIATELY after coordinate, don't wait
         avail_res = [r for r in resources if r.get("is_available", True)]
         
         # CRITICAL: Use ALL sources to detect unallocated threats
@@ -761,7 +761,7 @@ def rollout_single_episode(
             if int(t["threat_id"]) not in all_allocated_ids
         ]
 
-        # STRONG ALLOCATION ENFORCEMENT - Always allocate first, no exceptions
+        # FAST ALLOCATION - allocate immediately after coordinate
         if (forced_action is None
                 and coordinated_done
                 and unallocated
