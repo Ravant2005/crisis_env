@@ -64,7 +64,7 @@ DEFAULT_GAE_LAMBDA      = 0.95
 DEFAULT_PPO_EPSILON     = 0.10
 DEFAULT_PPO_EPOCHS      = 3
 DEFAULT_VALUE_COEFF     = 1.0
-DEFAULT_ENTROPY_COEFF   = 0.015
+DEFAULT_ENTROPY_COEFF   = 0.01
 DEFAULT_ENTROPY_DECAY   = 0.01
 DEFAULT_ENTROPY_FLOOR   = 0.05
 DEFAULT_HIDDEN          = 256
@@ -749,19 +749,25 @@ def rollout_single_episode(
 
         # Stage 4: Allocate any unallocated threats (FIX: use local set)
         avail_res = [r for r in resources if r.get("is_available", True)]
+        
+        # CRITICAL: Use ALL sources to detect unallocated threats
+        # 1. From forced_allocated_ids (ours)
+        # 2. From env observation (assigned_resource field)
+        env_allocated_ids = {int(t["threat_id"]) for t in ranked_threats if t.get("assigned_resource")}
+        all_allocated_ids = forced_allocated_ids | env_allocated_ids
+        
         unallocated = [
             t for t in ranked_threats
-            if int(t["threat_id"]) not in forced_allocated_ids
+            if int(t["threat_id"]) not in all_allocated_ids
         ]
 
+        # STRONG ALLOCATION ENFORCEMENT - Always allocate first, no exceptions
         if (forced_action is None
                 and coordinated_done
                 and unallocated
-                and len(forced_allocated_ids) < min(len(ranked_threats), 3)
                 and avail_res
                 and budget > 0):
             t = unallocated[0]
-            # Pick best available resource by effectiveness
             r = max(avail_res, key=lambda x: float(x.get("effectiveness",
                                                    x.get("intercept_probability", 0))))
             forced_action = {
@@ -773,16 +779,14 @@ def rollout_single_episode(
             }
             forced_allocated_ids.add(int(t["threat_id"]))
 
-        # FIX 6: Catch-up allocation — before rescue, check if any threat
-        # lost its resource (became unallocated again) and re-allocate.
+        # FIX 6: Catch-up allocation — also use env's assigned_resource
         if (forced_action is None
                 and coordinated_done
                 and avail_res
                 and budget > 0):
-            # Check for threats that need re-allocation
             needs_alloc = [
                 t for t in ranked_threats
-                if int(t["threat_id"]) not in forced_allocated_ids
+                if int(t["threat_id"]) not in all_allocated_ids
                 and not t.get("assigned_resource")
             ]
             if needs_alloc:
@@ -801,7 +805,7 @@ def rollout_single_episode(
         # FIX 5: FORCE allocation until ALL threats assigned (before rescue)
         unallocated_threats = [
             t for t in ranked_threats
-            if int(t["threat_id"]) not in forced_allocated_ids
+            if int(t["threat_id"]) not in all_allocated_ids
         ]
         if (forced_action is None
                 and unallocated_threats
@@ -819,9 +823,18 @@ def rollout_single_episode(
             }
             forced_allocated_ids.add(int(t["threat_id"]))
 
-        # FIX 1: START RESCUE EARLY if step >= 5
+        # CRITICAL FIX: Check ALL allocated sources (env + local)
+        pending_allocs = [
+            t for t in all_threats
+            if t.get("status") == "active"
+            and int(t["threat_id"]) not in all_allocated_ids
+        ]
+        can_allocate_more = len(pending_allocs) > 0 and avail_res and budget > 0
+        
+        # FIX 1: START RESCUE EARLY if step >= 5 AND no more allocation possible
         if (forced_action is None
                 and step_num >= 5
+                and not can_allocate_more
                 and zones
                 and budget > 0):
             active_zones = [
@@ -843,11 +856,12 @@ def rollout_single_episode(
                     },
                 }
 
-        # FIX 3: Stage 5 — Aggressive rescue
+        # FIX 3: Stage 5 — Aggressive rescue (ONLY when no more allocation possible)
         # Old code: units = max(1, budget // len(zones)) if step > 10 else 1
         # New code: send as many units as makes sense to clear the zone fast
         if (forced_action is None
                 and coordinated_done
+                and not can_allocate_more
                 and zones
                 and budget > 0):
             active_zones = [
@@ -919,20 +933,45 @@ def rollout_single_episode(
             )
             at = str(action_dict.get("action_type", "skip")).replace("ActionType.", "")
 
+            # CRITICAL: ALWAYS enforce allocation-first BEFORE any policy action
+            # Check if any unallocated threats exist
+            policy_active_t = [t for t in threats if t.get("status") == "active"]
+            policy_avail_r = [r for r in resources if r.get("is_available", True)]
+            policy_env_alloc = {int(t["threat_id"]) for t in policy_active_t if t.get("assigned_resource")}
+            policy_all_alloc = forced_allocated_ids | policy_env_alloc
+            policy_unalloc = [t for t in policy_active_t if int(t["threat_id"]) not in policy_all_alloc]
+            can_policy_alloc = len(policy_unalloc) > 0 and policy_avail_r and budget > 0
+            
+            # CRITICAL: Override rescue with allocate if unallocated threats exist
+            if at == "rescue" and can_policy_alloc:
+                # Force allocate, don't allow rescue yet
+                action_dict = {"action_type": "allocate", 
+                          "allocation": {"threat_id": int(policy_unalloc[0]["threat_id"]), 
+                                     "resource_id": int(policy_avail_r[0]["resource_id"])}}
+                at = "allocate"
+                forced_allocated_ids.add(int(policy_unalloc[0]["threat_id"]))
+            
             # ── Anti-skip guard ───────────────────────────────────────────
+            # CRITICAL: Must allocate first, then rescue - always
             if at == "skip":
                 active_z = [z for z in zones if int(z.get("total_victims", 0)) - int(z.get("rescued", 0)) > 0]
                 active_t = [t for t in threats if t.get("status") == "active"]
                 avail_r  = [r for r in resources if r.get("is_available", True)]
-
-                if active_z and budget > 0:
+                
+                # Use env's assigned_resource + local tracking
+                env_alloc = {int(t["threat_id"]) for t in active_t if t.get("assigned_resource")}
+                all_alloc = forced_allocated_ids | env_alloc
+                unalloc_t = [t for t in active_t if int(t["threat_id"]) not in all_alloc]
+                
+                # ALWAYS allocate first
+                if unalloc_t and avail_r and budget > 0:
+                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(unalloc_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
+                    at = "allocate"
+                elif active_z and budget > 0 and not unalloc_t:
                     z = max(active_z, key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
                     units = max(2, min(budget, budget // max(1, len(active_z))))
                     action_dict = {"action_type": "rescue", "rescue": {"zone_id": int(z["zone_id"]), "rescue_units_to_send": units}}
                     at = "rescue"
-                elif active_t and avail_r and budget > 0:
-                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(active_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
-                    at = "allocate"
                 elif active_t:
                     action_dict = {"action_type": "delay", "delay": {"threat_id": int(active_t[0]["threat_id"])}}
                     at = "delay"
@@ -944,15 +983,23 @@ def rollout_single_episode(
                 avail_r  = [r for r in resources if r.get("is_available", True)]
                 active_t = [t for t in threats if t.get("status") == "active"
                              and int(t["threat_id"]) not in forced_allocated_ids]
-                if active_z and budget > 0:
+                
+                # Use both env and local tracking
+                env_alloc = {int(t["threat_id"]) for t in threats if t.get("assigned_resource")}
+                all_alloc = forced_allocated_ids | env_alloc
+                active_t = [t for t in threats if t.get("status") == "active"
+                             and int(t["threat_id"]) not in all_alloc]
+                
+                # ALWAYS allocate first if possible
+                if active_t and avail_r and budget > 0:
+                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(active_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
+                    at = "allocate"
+                    forced_allocated_ids.add(int(active_t[0]["threat_id"]))
+                elif active_z and budget > 0 and not active_t:
                     z = max(active_z, key=lambda x: int(x.get("total_victims", 0)) - int(x.get("rescued", 0)))
                     units = max(2, min(budget, budget // max(1, len(active_z))))
                     action_dict = {"action_type": "rescue", "rescue": {"zone_id": int(z["zone_id"]), "rescue_units_to_send": units}}
                     at = "rescue"
-                elif active_t and avail_r and budget > 0:
-                    action_dict = {"action_type": "allocate", "allocation": {"threat_id": int(active_t[0]["threat_id"]), "resource_id": int(avail_r[0]["resource_id"])}}
-                    at = "allocate"
-                    forced_allocated_ids.add(int(active_t[0]["threat_id"]))
                 else:
                     action_dict = {"action_type": "skip"}
                     at = "skip"
