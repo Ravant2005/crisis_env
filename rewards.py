@@ -523,8 +523,8 @@ def compute_step_reward(
         
         # Hard stabilize allocation (Fix 1)
         timing_penalty += 0.15 * alloc_quality
-        if alloc_quality < 0.8:
-            timing_penalty -= 0.25
+        if alloc_quality < 0.75:
+            timing_penalty -= 0.20
 
     
     if task_kwargs is None:
