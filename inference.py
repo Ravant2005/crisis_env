@@ -12,11 +12,10 @@ Pipeline per episode:
     5. RESCUE    — deploy units into all impacted zones every step
 
 Logging format (mandatory):
-    [START]
-    [STEP N] action_type | threat/zone | result | reward | done
+    [START] task=... env=... model=...
+    [STEP] step=N action=... reward=... done=... error=...
     ...
-    [END]
-    [SCORE] task_scores + final
+    [END] success=... steps=... score=... rewards=...
 
 Usage:
     python3 inference.py                          # connects to localhost:8000
@@ -64,44 +63,23 @@ MAX_ACTIONS_PER_STEP = 6    # execute up to 6 actions per step (increased to fit
 # ─────────────────────────────────────────────
 
 _step: int = 0
-_cumulative_score: float = 0.0
 
 def log_start():
-    print("[START]", flush=True)
+    print(f"[START] task=crisis-response env=openenv model={MODEL_NAME}", flush=True)
 
-def log_step(action_type: str, target: str, result: str, reward: float, done: bool, decision_reasoning: str = "", cumulative_score: float = 0.0):
-    global _step, _cumulative_score
-    _step += 1
-    if cumulative_score is not None:
-        _cumulative_score = cumulative_score
-    else:
-        _cumulative_score = 0.0
-    
-    reasoning_str = f" | reasoning={decision_reasoning}" if decision_reasoning else ""
+def log_step(step, action, reward, done, error=None):
+    error_val = error if error else "null"
     print(
-        f"[STEP {_step}] "
-        f"action={action_type} | target={target} | result={result} | "
-        f"reward={reward:.4f} | done={done}{reasoning_str} | cumulative_score={_cumulative_score:.4f}",
-        flush=True,
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
+        flush=True
     )
 
-def log_end():
-    print("[END]", flush=True)
-
-def log_score(scores: Dict[str, Any]):
+def log_end(success, steps, score, rewards):
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[SCORE] "
-        f"classification={scores.get('classification', 0):.4f} | "
-        f"prediction={scores.get('prediction', 0):.4f} | "
-        f"allocation={scores.get('allocation', 0):.4f} | "
-        f"coordination={scores.get('coordination', 0):.4f} | "
-        f"rescue={scores.get('rescue', 0):.4f} | "
-        f"final={scores.get('final', 0):.4f}",
-        flush=True,
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True
     )
-
-def log_info(msg: str):
-    print(f"[INFO] {msg}", flush=True)
 
 def log_error(msg: str):
     print(f"[ERROR] {msg}", file=sys.stderr, flush=True)
@@ -376,15 +354,12 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
     Run one full episode of the Crisis Response environment.
     Returns the final grader scores.
     """
-    global _step, _cumulative_score
+    global _step
     _step = 0
-    _cumulative_score = 0.0
     
     # Use a unique session ID for this episode to avoid state conflicts
     import uuid
     session_id = f"episode_{uuid.uuid4().hex[:8]}"
-    
-    log_info(f"Connecting to {API_BASE_URL} | seed={seed} | difficulty={difficulty} | session={session_id} | use_llm={USE_LLM}")
 
     # ── Optional LLM client ────────────────────────────────────────────────
     llm_client = None
@@ -408,7 +383,6 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
             base_url=openai_base_url,
             api_key=openai_api_key if openai_api_key else "EMPTY"
         )
-        log_info(f"LLM client initialised — model={model_name} base_url={openai_base_url}")
 
     # ── Reset ──────────────────────────────────────────────────────────────
     reset_resp  = http_reset(seed=seed, difficulty=difficulty, session_id=session_id)
@@ -418,12 +392,6 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
     zones       = observation.get("affected_zones", [])
     done        = False
 
-    log_info(
-        f"Episode started — "
-        f"{len(threats)} threats | {len(resources)} resources | "
-        f"time_remaining={observation.get('time_remaining', 0)}"
-    )
-
     # ── Track which tasks have been done this episode ──────────────────────
     classified: set = set()
     predicted: set = set()
@@ -431,6 +399,9 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
     coordinated = False
     allocation_count: int = 0
     last_coord_step = -1
+    last_coord_order: list = []
+
+    rewards_list = []
 
     # ── Episode loop ───────────────────────────────────────────────────────
     step = 0
@@ -601,12 +572,9 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
             # Track live budget — used by rescue and allocation sizing
             _live_resource_budget = int(obs_data.get("resource_budget_remaining", 99))
             
-            # Get cumulative score with session_id
-            state = http_state(session_id)
-            cumulative = state.get("final_score", 0.0)
-            
-            result_label = alerts[0][:80] if alerts else "ok"
-            log_step(action_label, target_label, result_label, reward, done, reasoning, cumulative)
+            rewards_list.append(reward)
+            _step += 1
+            log_step(_step, action_label, reward, done, None)
             
             if done:
                 break
@@ -648,8 +616,8 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
         "final":          state.get("final_score", 0.0),
     }
 
-    log_end()
-    log_score(scores)
+    success = scores.get("final", 0.0) >= 0.85
+    log_end(success, _step, scores["final"], rewards_list)
     return scores
 
 
@@ -662,7 +630,6 @@ if __name__ == "__main__":
 
     try:
         scores = run_episode(seed=SEED, difficulty="medium")
-        log_info(f"Run complete — final_score={scores['final']:.4f}")
         sys.exit(0)
 
     except KeyboardInterrupt:
@@ -673,5 +640,4 @@ if __name__ == "__main__":
         import traceback
         log_error(f"Fatal: {exc}")
         traceback.print_exc()
-        log_end()
         sys.exit(2)

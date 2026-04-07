@@ -18,15 +18,77 @@ pinned: false
 
 ### A Real-World OpenEnv Environment for AI-Driven Multi-Threat Emergency Management
 
+> A high-fidelity RL environment where agents must coordinate multiple real-world crisis scenarios under uncertainty, constraints, and time pressure.
+
 [![OpenEnv Compliant](https://img.shields.io/badge/OpenEnv-Compliant-brightgreen)](https://github.com/meta-pytorch/OpenEnv)
 [![Tasks](https://img.shields.io/badge/Graded%20Tasks-5-orange)](./openenv.yaml)
 [![Difficulty](https://img.shields.io/badge/Difficulty-Easy%20→%20Hard-blue)](./server/environment.py)
 [![HF Space](https://img.shields.io/badge/Hugging%20Face-Docker%20Space-yellow)](https://huggingface.co/spaces)
-[![Baseline Score](https://img.shields.io/badge/Baseline%20Final%20Score-0.88-brightgreen)](./BASELINE_SCORES.md)
+[![Baseline Score](https://img.shields.io/badge/Baseline%20Final%20Score-0.56-brightgreen)](./BASELINE_SCORES.md)
 
 *OpenEnv × Scaler × Meta PyTorch Hackathon*
 
 </div>
+
+## Quick Summary
+
+- **Tasks:** 5 (classification → rescue)
+- **Difficulty:** easy → hard
+- **Final score range:** 0.0–1.0
+- **Deterministic:** Yes (seed=42 reproduces same scenario)
+- **Baseline score:** 0.56 (rule-based), 0.92 (trained PPO agent)
+- **Deployment:** Hugging Face Docker Space
+
+---
+
+## Environment Flow
+
+```
+Threats → Classify → Predict → Coordinate → Allocate → Rescue → Score
+```
+
+---
+
+## Why This Environment is Challenging
+
+- **Partial observability** — noisy sensor inputs with explicit uncertainty estimates
+- **Dynamic threats** — escalation and secondary spread probabilities
+- **Limited resources** — hard budget constraints (8-10 units per episode)
+- **Multi-objective optimization** — 5 simultaneous tasks with different weights
+- **Sequential dependency** — early mistakes cascade through later outcomes
+
+---
+
+## Action Space
+
+The environment supports the following actions:
+
+- **classify** - Classify threat type and severity
+- **predict** - Predict time-to-impact and population at risk
+- **allocate** - Deploy response resources to threats
+- **coordinate** - Set priority order for multiple threats
+- **rescue** - Deploy rescue units to post-impact zones
+- **delay** - Push back time-to-impact of a threat
+- **evacuate** - Evacuate a zone
+
+Each action has a structured payload defined in `models.py`.
+
+---
+
+## Observation Space
+
+The observation returned by the environment includes:
+
+- **threats:** list of active threats with noisy attributes
+- **resources:** available units with effectiveness and cooldown
+- **affected_zones:** post-impact zones with victim counts
+- **time_remaining:** steps left in episode
+- **resource_budget_remaining**
+- **uncertainty estimates:**
+  - severity_uncertainty
+  - population_uncertainty
+  - tti_uncertainty
+- **action_mask:** valid actions at current step
 
 ---
 
@@ -376,6 +438,37 @@ The deterministic heuristic baseline follows: classify all → predict all → c
 | **Final** | **0.5640** |
 
 The baseline deliberately does not use the trained RL policy — it uses a fixed rule-based pipeline to demonstrate reproducible scores from a non-learned agent. The trained PPO agent achieves 0.90–0.94 on medium difficulty across 50 random seeds.
+
+---
+
+## Reproducibility
+
+Run the following:
+
+```bash
+SEED=42 python inference.py
+```
+
+Expected output:
+```
+[START] task=crisis-response env=openenv model=rule_based
+[STEP] step=1 action=classify ...
+...
+[END] success=true steps=N score=0.564
+```
+
+Final score ≈ 0.56 (deterministic rule-based baseline)
+
+---
+
+## Inference Logging Format
+
+```
+[START] task=... env=... model=...
+[STEP] step=N action=... reward=... done=... error=...
+...
+[END] success=... steps=... score=... rewards=...
+```
 
 ---
 
