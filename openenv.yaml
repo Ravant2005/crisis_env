@@ -1,6 +1,24 @@
 spec_version: 1
 name: crisis_env
-type: space
-runtime: fastapi
-app: server.app:app
-port: 7860
+
+environment:
+  entry_point: server.app:app
+
+tasks:
+  - id: task_easy
+    grader: grade_task_easy
+
+  - id: task_medium
+    grader: grade_task_medium
+
+  - id: task_medium_plus
+    grader: grade_task_medium_plus
+
+  - id: task_hard
+    grader: grade_task_hard
+
+  - id: task_advanced
+    grader: grade_task_advanced
+
+grading:
+  module: grader
