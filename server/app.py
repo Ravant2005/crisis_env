@@ -67,6 +67,9 @@ class CrisisEnvObservation(Observation):
     coordination_score:   float = Field(default=0.0)
     rescue_score:         float = Field(default=0.0)
     final_score:          float = Field(default=0.0)
+    # Required fields
+    reward: float = Field(default=0.0)
+    done:   bool  = Field(default=False)
 
 
 # ─────────────────────────────────────────────
@@ -162,7 +165,10 @@ class CrisisEnvWrapper(Environment):
     def reset(self, seed: Optional[int] = None, **kwargs) -> CrisisEnvObservation:
         obs = self._env.reset(seed=seed or 42, difficulty="medium")
         self._state = State(episode_id=obs.episode_id, step_count=0)
-        return self._obs_to_openenv(obs)
+        openenv_obs = self._obs_to_openenv(obs)
+        openenv_obs.reward = 0.0
+        openenv_obs.done = False
+        return openenv_obs
 
     def step(self, action: CrisisEnvAction) -> CrisisEnvObservation:  # type: ignore[override]
         crisis_action = _CrisisAction(**action.model_dump(exclude={"metadata"}))
@@ -186,7 +192,10 @@ class CrisisEnvWrapper(Environment):
         return self._state
 
     def _obs_to_openenv(self, obs) -> CrisisEnvObservation:
-        d = obs.model_dump()
+        try:
+            d = obs.model_dump()
+        except Exception:
+            d = {}
         return CrisisEnvObservation(
             threats                   = d.get("threats", []),
             resources                 = d.get("resources", []),
