@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "AI Crisis Response & Rescue Coordination Environment"
 requires-python = ">=3.9"
 dependencies = [
-    "openenv-core>=0.2.1",
+    "openenv-core>=0.2.3",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
     "pydantic>=2.5.0",
