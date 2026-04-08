@@ -135,56 +135,45 @@ async def list_tasks():
                 "name":        "Threat Classification",
                 "difficulty":  "easy",
                 "action_type": ActionType.CLASSIFY,
-                "description": (
-                    "Identify the type and severity of each active threat. "
-                    "Grader: correct_predictions / total_predictions (0.0–1.0)."
-                ),
+                "grader":      "classification_score",
                 "grader_range": [0.0, 1.0],
+                "description": "Identify the type and severity of each active threat. Score = 0.70 × correct_ratio + 0.30 × severity_accuracy.",
             },
             {
                 "task_id":     2,
                 "name":        "Impact Prediction",
                 "difficulty":  "medium",
                 "action_type": ActionType.PREDICT,
-                "description": (
-                    "Predict the time-to-impact and population affected for each threat. "
-                    "Grader: 1 - normalised_error (0.0–1.0)."
-                ),
+                "grader":      "prediction_score",
                 "grader_range": [0.0, 1.0],
+                "description": "Predict time-to-impact and population affected. Score = 1.0 - (0.5 × tti_err + 0.5 × pop_err).",
             },
             {
                 "task_id":     3,
                 "name":        "Resource Allocation",
-                "difficulty":  "medium_plus",
+                "difficulty":  "medium",
                 "action_type": ActionType.ALLOCATE,
-                "description": (
-                    "Assign the best available resource unit to each threat, "
-                    "considering zone affinity and urgency. "
-                    "Grader: mean allocation quality score (0.0–1.0)."
-                ),
+                "grader":      "allocation_score",
                 "grader_range": [0.0, 1.0],
+                "description": "Assign zone-matched resources to threats. Score = 0.45 × effectiveness + 0.30 × zone_affinity + 0.15 × budget_efficiency.",
             },
             {
                 "task_id":     4,
                 "name":        "Multi-Threat Coordination",
                 "difficulty":  "hard",
                 "action_type": ActionType.COORDINATE,
-                "description": (
-                    "Set a global priority ordering across all active threats. "
-                    "Grader: weighted rank-correlation vs ideal severity×population/TTI ordering (0.0–1.0)."
-                ),
+                "grader":      "coordination_score",
                 "grader_range": [0.0, 1.0],
+                "description": "Rank threats by priority. Score = rank_correlation(agent_order, ideal_order).",
             },
             {
                 "task_id":     5,
                 "name":        "Rescue Optimisation",
-                "difficulty":  "advanced",
+                "difficulty":  "hard",
                 "action_type": ActionType.RESCUE,
-                "description": (
-                    "Deploy rescue units into impacted zones to save victims. "
-                    "Grader: composite of lives_saved_ratio + speed_score + resource_efficiency (0.0–1.0)."
-                ),
+                "grader":      "rescue_score",
                 "grader_range": [0.0, 1.0],
+                "description": "Deploy rescue units to save victims. Score = 0.65 × saved_ratio + 0.20 × speed_score + 0.15 × resource_efficiency.",
             },
         ]
     }

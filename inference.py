@@ -1,10 +1,5 @@
 """
 inference.py — AI Crisis Response & Rescue Coordination Agent.
-Deterministic baseline agent using a prioritized pipeline.
-
-Strategy:
-    Pipeline per threat: CLASSIFY -> PREDICT -> ALLOCATE
-    Secondary tasks: COORDINATE -> RESCUE
 
 MANDATORY Submission Format:
     [START] task=<task_name> env=<benchmark> model=<model_name>
@@ -15,99 +10,56 @@ MANDATORY Submission Format:
 import asyncio
 import os
 import json
-import time
 import uuid
-import textwrap
 import requests
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
 from openai import OpenAI
 
 # ─────────────────────────────────────────────
-# CONFIGURATION
+# CONFIGURATION  (injected by evaluator)
 # ─────────────────────────────────────────────
+API_BASE_URL:     str           = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY:          str           = os.getenv("API_KEY", os.getenv("HF_TOKEN", "EMPTY"))
+MODEL_NAME:       str           = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN:         Optional[str] = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")
 
-# ── Mandatory submission variables (injected by evaluator) ───────────────────
-# API_BASE_URL : LLM proxy endpoint (LiteLLM)
-# API_KEY      : LiteLLM proxy key (injected by evaluator)
-# MODEL_NAME   : model identifier for LLM calls
-# HF_TOKEN     : Hugging Face token (optional fallback)
-# LOCAL_IMAGE_NAME : optional, for from_docker_image()
-API_BASE_URL:     str           = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")  # LiteLLM proxy
-API_KEY:          str           = os.getenv("API_KEY", os.getenv("HF_TOKEN", "EMPTY"))           # evaluator injects API_KEY
-MODEL_NAME:       str           = os.getenv("MODEL_NAME",  "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN:         Optional[str] = os.getenv("HF_TOKEN")           # no default
-LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")   # for from_docker_image()
-
-# ── Environment server URL (separate from LLM proxy) ─────────────────────────
-ENV_URL: str = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space")
-
-# ── Project-specific variables ────────────────────────────────────────────────
-TASK_NAME:       str  = os.getenv("MY_ENV_V4_TASK",      "crisis-response")
-BENCHMARK:       str  = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
-SEED:            int  = int(os.getenv("SEED", "42"))
-USE_LLM:         bool = True   # always use LLM — required by evaluator to hit the proxy
-RECOORD_INTERVAL      = 12
+ENV_URL:          str           = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space")
+SEED:             int           = int(os.getenv("SEED", "42"))
+TASK_NAME:        str           = os.getenv("MY_ENV_V4_TASK", "crisis-response")
+BENCHMARK:        str           = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
 
 # ─────────────────────────────────────────────
-# LOGGING UTILS
+# LOGGING  (strict format required by evaluator)
 # ─────────────────────────────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val = error if error else "null"
-    done_val = str(done).lower()
-    print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True,
-    )
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error if error else 'null'}", flush=True)
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={','.join(f'{r:.2f}' for r in rewards)}", flush=True)
 
 # ─────────────────────────────────────────────
-# HTTP CLIENT (Environment)
+# OPENAI CLIENT  (uses evaluator-injected vars)
 # ─────────────────────────────────────────────
 
-def _headers() -> Dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if HF_TOKEN:
-        h["Authorization"] = f"Bearer {HF_TOKEN}"
-    return h
-
-async def http_reset(seed: int = SEED, difficulty: str = "medium", session_id: str = "test_session") -> Dict[str, Any]:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: requests.post(
-        f"{ENV_URL}/reset",
-        json={"seed": seed, "difficulty": difficulty, "session_id": session_id},
-        headers=_headers(),
-        timeout=30,
-    ).json())
-
-async def http_step(action: Dict[str, Any], session_id: str = "test_session") -> Dict[str, Any]:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: requests.post(
-        f"{ENV_URL}/step",
-        json={"action": action, "session_id": session_id},
-        headers=_headers(),
-        timeout=30,
-    ).json())
-
-async def http_state(session_id: str = "test_session") -> Dict[str, Any]:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: requests.get(
-        f"{ENV_URL}/state",
-        params={"session_id": session_id},
-        headers=_headers(),
-        timeout=30,
-    ).json())
+def make_client() -> OpenAI:
+    """Create OpenAI client pointed at the evaluator's LiteLLM proxy."""
+    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 # ─────────────────────────────────────────────
-# RULE-BASED DECISION ENGINE
+# LLM DECISION ENGINE  (called every step)
 # ─────────────────────────────────────────────
+
+def _priority_score(threat: Dict[str, Any]) -> float:
+    sev = float(threat.get("severity", 1.0))
+    pop = int(threat.get("population_at_risk", 1))
+    tti = max(int(threat.get("time_to_impact", 1)), 1)
+    return (sev * pop) / tti
 
 _ZONE_AFFINITY: Dict[str, List[str]] = {
     "military": ["military_unit", "medical_team"],
@@ -116,191 +68,200 @@ _ZONE_AFFINITY: Dict[str, List[str]] = {
     "rural":    ["fire_brigade", "medical_team", "rescue_drone"],
 }
 
-def _priority_score(threat: Dict[str, Any]) -> float:
-    sev = float(threat.get("severity", 1.0))
-    pop = int(threat.get("population_at_risk", 1))
-    tti = max(int(threat.get("time_to_impact", 1)), 1)
-    return (sev * pop) / tti
-
 def _best_resource(threat: Dict[str, Any], resources: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     zone = threat.get("zone", "")
     preferred = _ZONE_AFFINITY.get(zone, [])
     available = [r for r in resources if r.get("is_available", False)]
-    if not available: return None
-    def resource_score(r: Dict[str, Any]) -> float:
-        base = float(r.get("effectiveness", 0.5))
-        bonus = 0.3 if r.get("resource_type") in preferred else 0.0
-        return base + bonus
-    return max(available, key=resource_score)
+    if not available:
+        return None
+    return max(available, key=lambda r: float(r.get("effectiveness", 0.5)) + (0.3 if r.get("resource_type") in preferred else 0.0))
 
-def _classify_action(threat: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "action_type": "classify",
-        "classification": {
-            "threat_id": threat["threat_id"],
-            "predicted_type": threat["threat_type"],
-            "predicted_severity": threat["severity"],
-        },
-    }
+def llm_decide(client: OpenAI, obs: Dict[str, Any], step: int) -> Dict[str, Any]:
+    """
+    Ask the LLM what action to take given the current observation.
+    This ensures EVERY step makes an LLM call through the proxy.
+    Falls back to rule-based if LLM fails.
+    """
+    threats   = obs.get("threats", [])
+    resources = obs.get("resources", [])
+    zones     = obs.get("affected_zones", [])
+    budget    = int(obs.get("resource_budget_remaining", 0))
 
-def _predict_action(threat: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "action_type": "predict",
-        "prediction": {
-            "threat_id": threat["threat_id"],
-            "predicted_tti": max(int(threat.get("time_to_impact", 5)), 1),
-            "predicted_pop": int(threat.get("population_at_risk", 100)),
-        },
-    }
+    active_threats = [t for t in threats if t.get("status") == "active"]
+    active_zones   = [z for z in zones if z.get("is_active", False)]
 
-def _allocate_action(threat: Dict[str, Any], resources: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    res = _best_resource(threat, resources)
-    if res is None: return None
-    return {
-        "action_type": "allocate",
-        "allocation": {"threat_id": threat["threat_id"], "resource_id": res["resource_id"]},
-    }
-
-async def _llm_suggest_priority(threats: List[Dict[str, Any]], client: OpenAI) -> List[int]:
-    active = [t for t in threats if t.get("status") == "active"]
-    if not active: return [t["threat_id"] for t in threats]
-    prompt = (
-        "You are a crisis coordinator. Rank the following threats from highest to lowest priority.\n"
-        "Priority formula: severity × population_at_risk / time_to_impact\n\n"
-        "Threats:\n"
-        + "\n".join(f"- threat_id={t['threat_id']}, type={t['threat_type']}, severity={t['severity']}, population={t['population_at_risk']}, tti={t['time_to_impact']}" for t in active)
-        + "\n\nRespond ONLY with a JSON array of threat_ids in priority order."
+    # Build a concise state summary for the LLM
+    state_summary = (
+        f"Step {step}. Budget remaining: {budget}.\n"
+        f"Active threats: {[{'id': t['threat_id'], 'type': t['threat_type'], 'sev': t['severity'], 'tti': t['time_to_impact'], 'pop': t['population_at_risk'], 'zone': t['zone']} for t in active_threats]}\n"
+        f"Impacted zones needing rescue: {[{'id': z['zone_id'], 'victims': z['total_victims'], 'rescued': z['rescued']} for z in active_zones]}\n"
     )
+
+    prompt = (
+        "You are an AI crisis response coordinator. Given the current state, decide the single best action.\n\n"
+        f"{state_summary}\n"
+        "Available actions: classify, predict, allocate, coordinate, rescue\n\n"
+        "Rules:\n"
+        "- classify: identify threat type/severity (use threat_id)\n"
+        "- predict: forecast TTI and population (use threat_id)\n"
+        "- allocate: assign resource to threat (use threat_id + resource_id)\n"
+        "- coordinate: rank threats by priority (list threat_ids highest to lowest)\n"
+        "- rescue: send units to impacted zone (use zone_id + units 1-5)\n\n"
+        "Respond ONLY with a JSON object like one of these:\n"
+        '{"action": "classify", "threat_id": 1}\n'
+        '{"action": "predict", "threat_id": 1}\n'
+        '{"action": "allocate", "threat_id": 1, "resource_id": 2}\n'
+        '{"action": "coordinate", "priority_order": [1, 2, 3]}\n'
+        '{"action": "rescue", "zone_id": 1, "units": 3}\n'
+    )
+
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=64,
+            max_tokens=100,
         )
-        ids = json.loads(response.choices[0].message.content.strip())
-        if isinstance(ids, list): return ids
-    except Exception as llm_err:
-        print(f"[LLM_FALLBACK] {llm_err}", flush=True)
-    return [t["threat_id"] for t in sorted(active, key=_priority_score, reverse=True)]
+        raw = response.choices[0].message.content.strip()
+        decision = json.loads(raw)
+        action = decision.get("action", "")
+
+        if action == "classify" and active_threats:
+            tid = int(decision.get("threat_id", active_threats[0]["threat_id"]))
+            t = next((x for x in active_threats if x["threat_id"] == tid), active_threats[0])
+            return {"action_type": "classify", "classification": {"threat_id": t["threat_id"], "predicted_type": t["threat_type"], "predicted_severity": t["severity"]}}
+
+        if action == "predict" and active_threats:
+            tid = int(decision.get("threat_id", active_threats[0]["threat_id"]))
+            t = next((x for x in active_threats if x["threat_id"] == tid), active_threats[0])
+            return {"action_type": "predict", "prediction": {"threat_id": t["threat_id"], "predicted_tti": max(int(t.get("time_to_impact", 5)), 1), "predicted_pop": int(t.get("population_at_risk", 100))}}
+
+        if action == "allocate" and active_threats and resources:
+            tid = int(decision.get("threat_id", active_threats[0]["threat_id"]))
+            rid = int(decision.get("resource_id", 0))
+            t = next((x for x in active_threats if x["threat_id"] == tid), active_threats[0])
+            r = next((x for x in resources if x.get("is_available") and x["resource_id"] == rid), None) or _best_resource(t, resources)
+            if r:
+                return {"action_type": "allocate", "allocation": {"threat_id": t["threat_id"], "resource_id": r["resource_id"]}}
+
+        if action == "coordinate" and threats:
+            order = decision.get("priority_order", [t["threat_id"] for t in sorted(active_threats, key=_priority_score, reverse=True)])
+            return {"action_type": "coordinate", "coordination": {"priority_order": order}}
+
+        if action == "rescue" and active_zones and budget > 0:
+            zid   = int(decision.get("zone_id", active_zones[0]["zone_id"]))
+            units = min(int(decision.get("units", 3)), budget, 5)
+            z = next((x for x in active_zones if x["zone_id"] == zid), active_zones[0])
+            return {"action_type": "rescue", "rescue": {"zone_id": z["zone_id"], "rescue_units_to_send": units}}
+
+    except Exception as e:
+        print(f"[LLM_FALLBACK] {e}", flush=True)
+
+    # ── Rule-based fallback ──────────────────────────────────────────────────
+    return _rule_based_action(active_threats, active_zones, resources, budget)
+
+
+def _rule_based_action(active_threats, active_zones, resources, budget) -> Dict[str, Any]:
+    """Fallback rule-based action when LLM fails."""
+    ranked = sorted(active_threats, key=_priority_score, reverse=True)
+
+    for t in ranked:
+        if t.get("predicted_severity") is None:
+            return {"action_type": "classify", "classification": {"threat_id": t["threat_id"], "predicted_type": t["threat_type"], "predicted_severity": t["severity"]}}
+
+    for t in ranked:
+        if t.get("predicted_tti") is None:
+            return {"action_type": "predict", "prediction": {"threat_id": t["threat_id"], "predicted_tti": max(int(t.get("time_to_impact", 5)), 1), "predicted_pop": int(t.get("population_at_risk", 100))}}
+
+    if len(ranked) >= 2:
+        return {"action_type": "coordinate", "coordination": {"priority_order": [t["threat_id"] for t in ranked]}}
+
+    for t in ranked:
+        r = _best_resource(t, resources)
+        if r and budget > 0:
+            return {"action_type": "allocate", "allocation": {"threat_id": t["threat_id"], "resource_id": r["resource_id"]}}
+
+    if active_zones and budget > 0:
+        z = max(active_zones, key=lambda x: x.get("total_victims", 0) - x.get("rescued", 0))
+        return {"action_type": "rescue", "rescue": {"zone_id": z["zone_id"], "rescue_units_to_send": min(5, budget)}}
+
+    return {"action_type": "skip"}
 
 # ─────────────────────────────────────────────
-# MAIN LOOP
+# HTTP CLIENT  (environment server)
+# ─────────────────────────────────────────────
+
+def _env_headers() -> Dict[str, str]:
+    h = {"Content-Type": "application/json"}
+    if HF_TOKEN:
+        h["Authorization"] = f"Bearer {HF_TOKEN}"
+    return h
+
+async def http_reset(seed: int, session_id: str) -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: requests.post(
+        f"{ENV_URL}/reset",
+        json={"seed": seed, "difficulty": "medium", "session_id": session_id},
+        headers=_env_headers(), timeout=30,
+    ).json())
+
+async def http_step(action: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: requests.post(
+        f"{ENV_URL}/step",
+        json={"action": action, "session_id": session_id},
+        headers=_env_headers(), timeout=30,
+    ).json())
+
+async def http_state(session_id: str) -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: requests.get(
+        f"{ENV_URL}/state",
+        params={"session_id": session_id},
+        headers=_env_headers(), timeout=30,
+    ).json())
+
+# ─────────────────────────────────────────────
+# MAIN EPISODE LOOP
 # ─────────────────────────────────────────────
 
 async def main() -> None:
     session_id = f"episode_{uuid.uuid4().hex[:8]}"
-    
-    # OpenAI client — uses evaluator-injected API_BASE_URL + API_KEY (LiteLLM proxy)
-    # Ensure base_url ends with /v1 as required by OpenAI client
-    llm_base_url = API_BASE_URL.rstrip("/")
-    if not llm_base_url.endswith("/v1"):
-        llm_base_url = llm_base_url + "/v1"
-    client = OpenAI(base_url=llm_base_url, api_key=API_KEY)
+    client     = make_client()
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
         reset_resp = await http_reset(seed=SEED, session_id=session_id)
-        obs = reset_resp.get("observation", {})
-        threats = obs.get("threats", [])
-        resources = obs.get("resources", [])
-        zones = obs.get("affected_zones", [])
-        budget = int(obs.get("resource_budget_remaining", 99))
-        
-        classified, predicted, allocated = set(), set(), set()
-        coordinated = False
-        last_coord_step = -1
-        rewards = []
-        step = 0
-        done = False
+        obs        = reset_resp.get("observation", {})
+        rewards    = []
+        step       = 0
+        done       = False
 
         while not done:
             step += 1
-            active_threats = [t for t in threats if t.get("status") == "active"]
-            active_zones = [z for z in zones if z.get("is_active", False)]
-            
-            # PHASE ENGINE
-            phase = None
-            if active_threats:
-                active_threats = sorted(active_threats, key=lambda t: t.get("time_to_impact", 99))
-                
-                # Coordination check
-                ready_threats = [t for t in threats if t["threat_id"] in classified and t["threat_id"] in predicted]
-                if not coordinated and len(ready_threats) >= 2:
-                    phase = "coordinate"
-                
-                if phase is None:
-                    for t in active_threats:
-                        tid = t["threat_id"]
-                        if tid not in classified:
-                            phase, target_threat = "classify", t
-                            break
-                        elif tid not in predicted:
-                            phase, target_threat = "predict", t
-                            break
-                        elif tid not in allocated and budget > 0:
-                            phase, target_threat = "allocate", t
-                            break
-                
-                if phase is None:
-                    if (step - last_coord_step >= RECOORD_INTERVAL) and len(active_threats) >= 2:
-                        phase = "coordinate"
-                    elif active_zones and budget > 0:
-                        phase = "rescue"
-            elif active_zones and budget > 0:
-                phase = "rescue"
-            
-            if phase is None: break
 
-            # BUILD ACTION
-            action_payload = None
-            if phase == "classify":
-                action_payload = _classify_action(target_threat)
-            elif phase == "predict":
-                action_payload = _predict_action(target_threat)
-            elif phase == "allocate":
-                action_payload = _allocate_action(target_threat, resources)
-            elif phase == "coordinate":
-                order = await _llm_suggest_priority(threats, client) if USE_LLM else [t["threat_id"] for t in sorted(threats, key=_priority_score, reverse=True)]
-                action_payload = {"action_type": "coordinate", "coordination": {"priority_order": order}}
-            elif phase == "rescue":
-                target = sorted(active_zones, key=lambda z: z.get("total_victims", 0) - z.get("rescued", 0), reverse=True)[0]
-                # Send max units to maximize saved_ratio and speed_score
-                units = min(5, budget)
-                action_payload = {"action_type": "rescue", "rescue": {"zone_id": target["zone_id"], "rescue_units_to_send": units}}
+            # LLM called on EVERY step — always hits the proxy
+            action_payload = llm_decide(client, obs, step)
 
-            if not action_payload: break
-
-            # EXECUTE
-            res = await http_step(action_payload, session_id)
+            res    = await http_step(action_payload, session_id)
             reward = res.get("reward", 0.0)
-            done = res.get("done", False)
-            obs = res.get("observation", {})
-            
-            # UPDATE STATE
-            threats = obs.get("threats", threats)
-            resources = obs.get("resources", resources)
-            zones = obs.get("affected_zones", zones)
-            budget = int(obs.get("resource_budget_remaining", budget))
+            done   = res.get("done", False)
+            obs    = res.get("observation", obs)
             rewards.append(reward)
-            
-            log_step(step, phase, reward, done, None)
 
-            # UPDATE TRACKING
-            if phase == "classify": classified.add(target_threat["threat_id"])
-            if phase == "predict": predicted.add(target_threat["threat_id"])
-            if phase == "allocate" and action_payload: allocated.add(target_threat["threat_id"])
-            if phase == "coordinate": coordinated, last_coord_step = True, step
+            log_step(step, action_payload.get("action_type", "unknown"), reward, done, None)
 
-        # FINAL
-        state = await http_state(session_id)
+            if step > 50:  # safety guard
+                break
+
+        state       = await http_state(session_id)
         final_score = state.get("final_score", 0.0)
         log_end(done, step, final_score, rewards)
 
     except Exception as e:
         log_end(False, 0, 0.0, [])
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] {e}", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
