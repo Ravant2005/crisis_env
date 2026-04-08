@@ -1,451 +1,217 @@
 """
-server/app.py — FastAPI server for the AI Crisis Response & Rescue Coordination Environment.
-Implements the full OpenEnv server protocol:
-  REST:      GET /  |  GET /health  |  GET /tasks  |  GET /state  |  GET /scores
-             POST /reset  |  POST /step
-  WebSocket: /ws  (primary agentic interface)
+server/app.py — CrisisAI OpenEnv Environment Server.
+
+Uses openenv.core.env_server.http_server.create_app() to create a
+fully compliant OpenEnv server with all required endpoints including
+/health, /metadata, /schema, /mcp, /tasks with graders.
 """
 
 from __future__ import annotations
 
-import json
-import traceback
-from typing import Any, Dict, Optional
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import ValidationError
-
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from models import (
-    CrisisAction, CrisisObservation, CrisisState, StepResult,
-    ActionType,
+from typing import Any, Dict, List, Optional
+from pydantic import Field
+
+from openenv.core.env_server.http_server import create_app
+from openenv.core.env_server.types import Action, Observation, State
+from openenv.core.env_server.interfaces import Environment
+from openenv.core.rubrics import Rubric
+
+# ─────────────────────────────────────────────
+# IMPORT CRISIS ENVIRONMENT
+# ─────────────────────────────────────────────
+
+try:
+    from server.environment import CrisisEnvironment
+    from models import CrisisAction as _CrisisAction
+except ImportError:
+    from environment import CrisisEnvironment
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from models import CrisisAction as _CrisisAction
+
+
+# ─────────────────────────────────────────────
+# OPENENV ACTION / OBSERVATION MODELS
+# ─────────────────────────────────────────────
+
+class CrisisEnvAction(Action):
+    """Action for CrisisAI environment."""
+    action_type: str = Field(default="skip", description="Action type")
+    classification: Optional[Dict[str, Any]] = Field(default=None)
+    prediction:     Optional[Dict[str, Any]] = Field(default=None)
+    allocation:     Optional[Dict[str, Any]] = Field(default=None)
+    coordination:   Optional[Dict[str, Any]] = Field(default=None)
+    rescue:         Optional[Dict[str, Any]] = Field(default=None)
+    delay:          Optional[Dict[str, Any]] = Field(default=None)
+
+
+class CrisisEnvObservation(Observation):
+    """Observation from CrisisAI environment."""
+    threats:                   List[Dict[str, Any]] = Field(default_factory=list)
+    resources:                 List[Dict[str, Any]] = Field(default_factory=list)
+    affected_zones:            List[Dict[str, Any]] = Field(default_factory=list)
+    time_remaining:            int                  = Field(default=0)
+    resource_budget_remaining: int                  = Field(default=0)
+    resource_budget_total:     int                  = Field(default=0)
+    alerts:                    List[str]            = Field(default_factory=list)
+    episode_id:                str                  = Field(default="")
+    valid_actions:             Dict[str, Any]       = Field(default_factory=dict)
+    # Task scores embedded in observation
+    classification_score: float = Field(default=0.0)
+    prediction_score:     float = Field(default=0.0)
+    allocation_score:     float = Field(default=0.0)
+    coordination_score:   float = Field(default=0.0)
+    rescue_score:         float = Field(default=0.0)
+    final_score:          float = Field(default=0.0)
+
+
+# ─────────────────────────────────────────────
+# GRADERS (Rubrics)
+# ─────────────────────────────────────────────
+
+class ClassificationRubric(Rubric):
+    """Grader for Threat Classification — score in [0, 1]."""
+    def forward(self, action: Any, observation: Any) -> float:
+        if isinstance(observation, CrisisEnvObservation):
+            return float(observation.classification_score)
+        if isinstance(observation, dict):
+            return float(observation.get("classification_score", 0.0))
+        return 0.0
+
+
+class PredictionRubric(Rubric):
+    """Grader for Impact Prediction — score in [0, 1]."""
+    def forward(self, action: Any, observation: Any) -> float:
+        if isinstance(observation, CrisisEnvObservation):
+            return float(observation.prediction_score)
+        if isinstance(observation, dict):
+            return float(observation.get("prediction_score", 0.0))
+        return 0.0
+
+
+class AllocationRubric(Rubric):
+    """Grader for Resource Allocation — score in [0, 1]."""
+    def forward(self, action: Any, observation: Any) -> float:
+        if isinstance(observation, CrisisEnvObservation):
+            return float(observation.allocation_score)
+        if isinstance(observation, dict):
+            return float(observation.get("allocation_score", 0.0))
+        return 0.0
+
+
+class CoordinationRubric(Rubric):
+    """Grader for Multi-Threat Coordination — score in [0, 1]."""
+    def forward(self, action: Any, observation: Any) -> float:
+        if isinstance(observation, CrisisEnvObservation):
+            return float(observation.coordination_score)
+        if isinstance(observation, dict):
+            return float(observation.get("coordination_score", 0.0))
+        return 0.0
+
+
+class RescueRubric(Rubric):
+    """Grader for Rescue Optimisation — score in [0, 1]."""
+    def forward(self, action: Any, observation: Any) -> float:
+        if isinstance(observation, CrisisEnvObservation):
+            return float(observation.rescue_score)
+        if isinstance(observation, dict):
+            return float(observation.get("rescue_score", 0.0))
+        return 0.0
+
+
+class CrisisRubric(Rubric):
+    """Composite rubric with 5 named graders for all crisis tasks."""
+    def __init__(self):
+        super().__init__()
+        self.classification = ClassificationRubric()
+        self.prediction      = PredictionRubric()
+        self.allocation      = AllocationRubric()
+        self.coordination    = CoordinationRubric()
+        self.rescue          = RescueRubric()
+
+    def forward(self, action: Any, observation: Any) -> float:
+        c  = self.classification(action, observation)
+        p  = self.prediction(action, observation)
+        a  = self.allocation(action, observation)
+        co = self.coordination(action, observation)
+        r  = self.rescue(action, observation)
+        return round(0.20*c + 0.20*p + 0.20*a + 0.15*co + 0.25*r, 4)
+
+
+# ─────────────────────────────────────────────
+# OPENENV ENVIRONMENT WRAPPER
+# ─────────────────────────────────────────────
+
+class CrisisEnvWrapper(Environment):
+    """
+    OpenEnv-compliant wrapper around CrisisEnvironment.
+    Exposes 5 named rubric graders for task validation.
+    """
+
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
+    def __init__(self):
+        super().__init__(rubric=CrisisRubric())
+        self._env  = CrisisEnvironment(seed=42)
+        self._state = State(episode_id="", step_count=0)
+
+    def reset(self, seed: Optional[int] = None, **kwargs) -> CrisisEnvObservation:
+        obs = self._env.reset(seed=seed or 42, difficulty="medium")
+        self._state = State(episode_id=obs.episode_id, step_count=0)
+        return self._obs_to_openenv(obs)
+
+    def step(self, action: CrisisEnvAction) -> CrisisEnvObservation:  # type: ignore[override]
+        crisis_action = _CrisisAction(**action.model_dump(exclude={"metadata"}))
+        result = self._env.step(crisis_action)
+        self._state.step_count += 1
+        obs = self._obs_to_openenv(result.observation)
+        obs.reward = result.reward
+        obs.done   = result.done
+        # Embed task scores into observation
+        scores = self._env.task_scores()
+        obs.classification_score = scores.get("classification", 0.0)
+        obs.prediction_score     = scores.get("prediction",     0.0)
+        obs.allocation_score     = scores.get("allocation",     0.0)
+        obs.coordination_score   = scores.get("coordination",   0.0)
+        obs.rescue_score         = scores.get("rescue",         0.0)
+        obs.final_score          = self._env.state().final_score
+        return obs
+
+    @property
+    def state(self) -> State:
+        return self._state
+
+    def _obs_to_openenv(self, obs) -> CrisisEnvObservation:
+        d = obs.model_dump()
+        return CrisisEnvObservation(
+            threats                   = d.get("threats", []),
+            resources                 = d.get("resources", []),
+            affected_zones            = d.get("affected_zones", []),
+            time_remaining            = d.get("time_remaining", 0),
+            resource_budget_remaining = d.get("resource_budget_remaining", 0),
+            resource_budget_total     = d.get("resource_budget_total", 0),
+            alerts                    = d.get("alerts", []),
+            episode_id                = d.get("episode_id", ""),
+            valid_actions             = d.get("valid_actions", {}),
+        )
+
+
+# ─────────────────────────────────────────────
+# CREATE APP via openenv create_app()
+# ─────────────────────────────────────────────
+
+app = create_app(
+    CrisisEnvWrapper,
+    CrisisEnvAction,
+    CrisisEnvObservation,
+    env_name="crisis_env",
+    max_concurrent_envs=4,
 )
-from server.environment import CrisisEnvironment
 
-# ─────────────────────────────────────────────
-# APP SETUP
-# ─────────────────────────────────────────────
-
-app = FastAPI(
-    title="AI Crisis Response & Rescue Coordination — OpenEnv",
-    description=(
-        "A real-world OpenEnv environment where an AI agent classifies threats, "
-        "predicts impact, allocates resources, coordinates multi-threat response, "
-        "and optimizes rescue operations to maximise lives saved."
-    ),
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ─────────────────────────────────────────────
-# GLOBAL ENVIRONMENT REGISTRY
-# ─────────────────────────────────────────────
-
-_environments: Dict[str, CrisisEnvironment] = {}
-_DEFAULT_SESSION = "default"
-
-
-def _get_env(session_id: str = _DEFAULT_SESSION) -> CrisisEnvironment:
-    if session_id not in _environments:
-        _environments[session_id] = CrisisEnvironment()
-    return _environments[session_id]
-
-
-def _new_env(session_id: str = _DEFAULT_SESSION, seed: Optional[int] = None) -> CrisisEnvironment:
-    env = CrisisEnvironment(seed=seed)
-    _environments[session_id] = env
-    return env
-
-
-# ─────────────────────────────────────────────
-# SERIALISATION HELPERS
-# ─────────────────────────────────────────────
-
-def _obs_to_dict(obs: CrisisObservation) -> Dict[str, Any]:
-    return obs.model_dump()
-
-
-def _state_to_dict(state: CrisisState) -> Dict[str, Any]:
-    return state.model_dump()
-
-
-def _step_to_dict(result: StepResult) -> Dict[str, Any]:
-    return {
-        "observation": _obs_to_dict(result.observation),
-        "reward":      result.reward,
-        "done":        result.done,
-        "info":        result.info,
-    }
-
-
-def _error_response(code: str, message: str) -> Dict[str, Any]:
-    return {"status": "error", "code": code, "message": message}
-
-
-# ─────────────────────────────────────────────
-# REST ENDPOINTS
-# ─────────────────────────────────────────────
-
-@app.get("/", tags=["System"])
-async def root():
-    """Root endpoint — required for Hugging Face Space validation."""
-    return {
-        "name":        "CrisisAI: AI Crisis Response & Rescue Coordination",
-        "version":     "1.0.0",
-        "status":      "running",
-        "description": "OpenEnv-compliant RL environment for multi-threat emergency coordination.",
-        "endpoints": {
-            "health": "GET  /health",
-            "reset":  "POST /reset",
-            "step":   "POST /step",
-            "state":  "GET  /state",
-            "scores": "GET  /scores",
-            "tasks":  "GET  /tasks",
-            "ws":     "WS   /ws",
-            "docs":   "GET  /docs",
-        },
-    }
-
-
-@app.get("/health", tags=["System"])
-async def health_check():
-    """Liveness probe — required by OpenEnv spec."""
-    return {"status": "healthy", "service": "crisis-response-openenv", "version": "1.0.0"}
-
-
-@app.get("/metadata", tags=["OpenEnv"])
-async def metadata():
-    """Environment metadata — required by OpenEnv spec."""
-    return {
-        "name":        "CrisisAI: AI Crisis Response & Rescue Coordination",
-        "description": "An OpenEnv-compliant RL environment for AI-driven multi-threat emergency coordination under partial observability and tight resource constraints.",
-        "version":     "1.0.0",
-        "tasks": [
-            {"id": 1, "name": "Threat Classification",    "grader": "classification_score", "score_range": [0.0, 1.0]},
-            {"id": 2, "name": "Impact Prediction",        "grader": "prediction_score",     "score_range": [0.0, 1.0]},
-            {"id": 3, "name": "Resource Allocation",      "grader": "allocation_score",     "score_range": [0.0, 1.0]},
-            {"id": 4, "name": "Multi-Threat Coordination", "grader": "coordination_score",  "score_range": [0.0, 1.0]},
-            {"id": 5, "name": "Rescue Optimisation",      "grader": "rescue_score",         "score_range": [0.0, 1.0]},
-        ],
-    }
-
-
-@app.get("/schema", tags=["OpenEnv"])
-async def schema():
-    """Action, observation and state schemas — required by OpenEnv spec."""
-    return {
-        "action": {
-            "type": "object",
-            "properties": {
-                "action_type": {"type": "string", "enum": ["classify", "predict", "allocate", "coordinate", "rescue", "delay", "skip"]},
-                "classification": {"type": "object"},
-                "prediction":     {"type": "object"},
-                "allocation":     {"type": "object"},
-                "coordination":   {"type": "object"},
-                "rescue":         {"type": "object"},
-            },
-            "required": ["action_type"],
-        },
-        "observation": {
-            "type": "object",
-            "properties": {
-                "threats":                   {"type": "array"},
-                "resources":                 {"type": "array"},
-                "affected_zones":            {"type": "array"},
-                "time_remaining":            {"type": "integer"},
-                "resource_budget_remaining": {"type": "integer"},
-                "alerts":                    {"type": "array"},
-                "valid_actions":             {"type": "object"},
-            },
-        },
-        "state": {
-            "type": "object",
-            "properties": {
-                "classification_score": {"type": "number"},
-                "prediction_score":     {"type": "number"},
-                "allocation_score":     {"type": "number"},
-                "coordination_score":   {"type": "number"},
-                "rescue_score":         {"type": "number"},
-                "final_score":          {"type": "number"},
-                "done":                 {"type": "boolean"},
-            },
-        },
-    }
-
-
-@app.post("/mcp", tags=["OpenEnv"])
-async def mcp_endpoint(body: Dict[str, Any] = None):
-    """MCP JSON-RPC endpoint — required by OpenEnv spec."""
-    body = body or {}
-    method = body.get("method", "")
-    req_id = body.get("id", 1)
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0", "id": req_id,
-            "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "crisis-response-openenv", "version": "1.0.0"}}
-        }
-    return {"jsonrpc": "2.0", "id": req_id, "result": {"status": "ok"}}
-
-
-@app.get("/tasks", tags=["OpenEnv"])
-async def list_tasks():
-    """Return all task definitions with grader metadata."""
-    return {
-        "tasks": [
-            {
-                "task_id":     1,
-                "name":        "Threat Classification",
-                "difficulty":  "easy",
-                "action_type": ActionType.CLASSIFY,
-                "grader":      "classification_score",
-                "grader_range": [0.0, 1.0],
-                "score_range": [0.0, 1.0],
-                "description": "Identify the type and severity of each active threat. Score = 0.70 × correct_ratio + 0.30 × severity_accuracy.",
-            },
-            {
-                "task_id":     2,
-                "name":        "Impact Prediction",
-                "difficulty":  "medium",
-                "action_type": ActionType.PREDICT,
-                "grader":      "prediction_score",
-                "grader_range": [0.0, 1.0],
-                "score_range": [0.0, 1.0],
-                "description": "Predict time-to-impact and population affected. Score = 1.0 - (0.5 × tti_err + 0.5 × pop_err).",
-            },
-            {
-                "task_id":     3,
-                "name":        "Resource Allocation",
-                "difficulty":  "medium",
-                "action_type": ActionType.ALLOCATE,
-                "grader":      "allocation_score",
-                "grader_range": [0.0, 1.0],
-                "score_range": [0.0, 1.0],
-                "description": "Assign zone-matched resources to threats. Score = 0.45 × effectiveness + 0.30 × zone_affinity + 0.15 × budget_efficiency.",
-            },
-            {
-                "task_id":     4,
-                "name":        "Multi-Threat Coordination",
-                "difficulty":  "hard",
-                "action_type": ActionType.COORDINATE,
-                "grader":      "coordination_score",
-                "grader_range": [0.0, 1.0],
-                "score_range": [0.0, 1.0],
-                "description": "Rank threats by priority. Score = rank_correlation(agent_order, ideal_order).",
-            },
-            {
-                "task_id":     5,
-                "name":        "Rescue Optimisation",
-                "difficulty":  "hard",
-                "action_type": ActionType.RESCUE,
-                "grader":      "rescue_score",
-                "grader_range": [0.0, 1.0],
-                "score_range": [0.0, 1.0],
-                "description": "Deploy rescue units to save victims. Score = 0.65 × saved_ratio + 0.20 × speed_score + 0.15 × resource_efficiency.",
-            },
-        ]
-    }
-
-
-@app.post("/reset", tags=["OpenEnv"])
-async def reset_endpoint(body: Optional[Dict[str, Any]] = None):
-    """
-    Reset the environment and return the initial observation.
-    Optional body: { "seed": <int>, "difficulty": <str>, "session_id": <str> }
-    """
-    body       = body or {}
-    seed       = body.get("seed", None)
-    difficulty = body.get("difficulty", "medium")
-    session_id = body.get("session_id", _DEFAULT_SESSION)
-
-    env = _new_env(session_id=session_id, seed=seed)
-    obs = env.reset(seed=seed, difficulty=difficulty)
-    return {"status": "ok", "observation": _obs_to_dict(obs)}
-
-
-@app.post("/step", tags=["OpenEnv"])
-async def step_endpoint(body: Dict[str, Any]):
-    """
-    Submit one action and advance the simulation by one step.
-    Body: { "action": <CrisisAction>, "session_id": <str> (optional) }
-    Returns: { observation, reward, done, info }
-    """
-    session_id  = body.get("session_id", _DEFAULT_SESSION)
-    env         = _get_env(session_id)
-    action_data = body.get("action")
-
-    if action_data is None:
-        raise HTTPException(status_code=422, detail="Missing 'action' field in request body.")
-
-    try:
-        action = CrisisAction(**action_data)
-    except (ValidationError, Exception) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid action: {exc}")
-
-    result = env.step(action)
-    return _step_to_dict(result)
-
-
-@app.get("/state", tags=["OpenEnv"])
-async def state_endpoint(session_id: str = _DEFAULT_SESSION):
-    """Return the current episode state and all task grader scores."""
-    env   = _get_env(session_id)
-    state = env.state()
-    return _state_to_dict(state)
-
-
-@app.get("/scores", tags=["OpenEnv"])
-async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
-    """Convenience endpoint returning only the grader scores for all 5 tasks."""
-    env   = _get_env(session_id)
-    state = env.state()
-    return {
-        "classification": round(state.classification_score, 4),
-        "prediction":     round(state.prediction_score,     4),
-        "allocation":     round(state.allocation_score,     4),
-        "coordination":   round(state.coordination_score,   4),
-        "rescue":         round(state.rescue_score,         4),
-        "final":          round(state.final_score,          4),
-        "final_score":    round(state.final_score,          4),
-        "episode_id":     state.episode_id,
-        "done":           state.done,
-    }
-
-
-# ─────────────────────────────────────────────
-# WEBSOCKET — PRIMARY AGENTIC INTERFACE  (/ws)
-# ─────────────────────────────────────────────
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """Primary WebSocket interface for agentic interaction."""
-    await websocket.accept()
-
-    session_id = f"ws_{id(websocket)}"
-    env        = _new_env(session_id=session_id)
-
-    async def send(msg_type: str, data: Any = None):
-        payload: Dict[str, Any] = {"type": msg_type}
-        if data is not None:
-            payload["data"] = data
-        await websocket.send_text(json.dumps(payload, default=str))
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await send("error", _error_response("PARSE_ERROR", "Invalid JSON received."))
-                continue
-
-            command = msg.get("command", "").strip().lower()
-
-            if command == "ping":
-                await send("pong")
-
-            elif command == "reset":
-                seed = msg.get("seed", None)
-                env  = _new_env(session_id=session_id, seed=seed)
-                obs  = env.reset()
-                await send("observation", _obs_to_dict(obs))
-
-            elif command == "step":
-                action_data = msg.get("action")
-                if not action_data:
-                    await send("error", _error_response(
-                        "MISSING_ACTION", "Field 'action' is required for step command."
-                    ))
-                    continue
-
-                try:
-                    action = CrisisAction(**action_data)
-                except (ValidationError, Exception) as exc:
-                    await send("error", _error_response("INVALID_ACTION", str(exc)))
-                    continue
-
-                try:
-                    result = env.step(action)
-                    await send("step_result", _step_to_dict(result))
-                    if result.done:
-                        await send("state", _state_to_dict(env.state()))
-                except Exception as exc:
-                    await send("error", _error_response(
-                        "STEP_ERROR", f"Simulation error: {exc}\n{traceback.format_exc()}"
-                    ))
-
-            elif command == "state":
-                await send("state", _state_to_dict(env.state()))
-
-            elif command == "tasks":
-                tasks_resp = await list_tasks()
-                await send("tasks", tasks_resp)
-
-            elif command == "scores":
-                task_scores = env.task_scores()
-                st = env.state()
-                await send("scores", {
-                    "classification": round(task_scores.get("classification", 0.0), 4),
-                    "prediction":     round(task_scores.get("prediction",     0.0), 4),
-                    "allocation":     round(task_scores.get("allocation",     0.0), 4),
-                    "coordination":   round(task_scores.get("coordination",   0.0), 4),
-                    "rescue":         round(task_scores.get("rescue",         0.0), 4),
-                    "final":          round(st.final_score, 4),
-                })
-
-            else:
-                await send("error", _error_response(
-                    "UNKNOWN_COMMAND",
-                    f"Unknown command '{command}'. Valid: reset, step, state, tasks, scores, ping."
-                ))
-
-    except WebSocketDisconnect:
-        _environments.pop(session_id, None)
-
-    except Exception as exc:
-        try:
-            await send("error", _error_response("FATAL_ERROR", f"Unexpected server error: {exc}"))
-        except Exception:
-            pass
-        finally:
-            _environments.pop(session_id, None)
-
-
-# ─────────────────────────────────────────────
-# EXCEPTION HANDLERS
-# ─────────────────────────────────────────────
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc: HTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"status": "error", "code": exc.status_code, "message": exc.detail},
-    )
-
-
-@app.exception_handler(Exception)
-async def generic_exception_handler(request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={"status": "error", "code": "INTERNAL_ERROR", "message": str(exc)},
-    )
-
-
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
 
 def main():
     import uvicorn
