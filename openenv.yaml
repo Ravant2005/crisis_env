@@ -1,6 +1,10 @@
 spec_version: 1
 name: crisis_env
 
+runtime: fastapi
+app: server.app:app
+port: 7860
+
 environment:
   entry_point: server.app:app
 
