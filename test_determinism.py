@@ -4,6 +4,7 @@ test_determinism.py — Tests that the environment produces deterministic result
 Runs the same episode 3 times with the same seed and verifies identical outputs.
 """
 
+import os
 import subprocess
 import sys
 import json
@@ -19,8 +20,8 @@ def run_episode(seed: int) -> dict:
         ["python3", "inference.py"],
         capture_output=True,
         text=True,
-        env={**subprocess.os.environ.copy(), **env},
-        cwd=subprocess.os.path.dirname(__file__) or ".",
+        env={**os.environ.copy(), **env},
+        cwd=os.path.dirname(os.path.abspath(__file__)),
     )
     
     output = result.stdout

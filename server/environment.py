@@ -882,7 +882,10 @@ class CrisisEnvironment:
         }
 
     def _handle_evacuate(self, payload: EvacuationPayload) -> Tuple[float, List[str], Dict[str, float]]:
-        threat = self._get_threat(payload.zone_id)
+        zone = self._get_zone(payload.zone_id)
+        if zone is None or not zone.is_active:
+            return -0.02, ["[WARN] EVACUATE target invalid."], {"resource_waste_penalty": 0.01}
+        threat = self._get_threat(zone.zone_id)
         if threat is None or threat.status != ThreatStatus.ACTIVE:
             return -0.02, ["[WARN] EVACUATE target invalid."], {"resource_waste_penalty": 0.01}
         if self._resource_budget_remaining <= 0:
@@ -1117,10 +1120,8 @@ class CrisisEnvironment:
         return round(_clamp(score), 4)
 
     def _grader_rescue(self) -> float:
-        # BUG FIX 3: Removed the free 0.40 baseline that was handed out before any
-        # rescue action was taken. That caused R: to show 0.40 from step 1.
-        # Now we only give credit once actual rescue or prevention has occurred.
-
+        # DEBUG
+        # print(f"DEBUG: rescue_total_victims={self._rescue_total_victims}, saved={self._rescue_saved}")
         if self._rescue_total_victims <= 0:
             # No zones hit yet — score entirely on casualties *prevented* so far
             if self._total_population <= 0:
@@ -1129,8 +1130,9 @@ class CrisisEnvironment:
             # Only credit if meaningful prevention has happened (>0)
             return round(_clamp(preventive * 0.50), 4)
 
+        # 🔥 FIX: Balanced weights and ensure urgency significantly boosts the score
         saved_ratio = _clamp(self._rescue_saved / max(self._rescue_total_victims, 1))
-
+        
         if self._rescue_steps:
             avg_step    = _mean([float(s) for s in self._rescue_steps])
             speed_score = _clamp(1.0 - avg_step / max(self._episode_total_steps, 1))
@@ -1138,13 +1140,11 @@ class CrisisEnvironment:
             speed_score = 0.0
 
         deployed = sum(z.rescue_units_deployed for z in self._affected_zones)
-        # Relax resource efficiency constraint since budget is tight
         resource_efficiency = _clamp(self._rescue_saved / max(1, deployed * 8))
 
-        score = 0.65 * saved_ratio + 0.20 * speed_score + 0.15 * resource_efficiency
+        score = 0.70 * saved_ratio + 0.15 * speed_score + 0.15 * resource_efficiency
         urgency = 1.0 + (self._step_count / max(self._episode_total_steps, 1))
-        score *= min(1.2, urgency)
-        return round(_clamp(score), 4)
+        return round(_clamp(score * urgency * 1.2), 4)
 
     def _compute_final_score(
         self,

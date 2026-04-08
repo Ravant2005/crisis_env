@@ -2,9 +2,8 @@ name: crisis_response_env
 version: "1.0"
 description: >
   AI Crisis Response & Rescue Coordination Environment.
-  A real-world OpenEnv environment where an AI agent must simultaneously classify
-  threats, predict impact, allocate resources, coordinate multi-threat response,
-  and optimise rescue operations to maximise lives saved and minimise casualties.
+  Models FEMA-style disaster response coordination — classify incidents, predict impact timelines,
+  allocate first-responder units, coordinate multi-incident triage, and optimize victim rescue.
 
 author: crisis-response-team
 tags:
@@ -92,7 +91,7 @@ tasks:
       Score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio).
   - id: 3
     name: Resource Allocation
-    difficulty: medium_plus
+    difficulty: medium
     action: allocate
     grader: allocation_score
     score_range: [0.0, 1.0]
@@ -110,7 +109,7 @@ tasks:
       Score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided.
   - id: 5
     name: Rescue Optimisation
-    difficulty: advanced
+    difficulty: hard
     action: rescue
     grader: rescue_score
     score_range: [0.0, 1.0]

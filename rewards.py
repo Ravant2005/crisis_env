@@ -24,11 +24,11 @@ from typing import Any, Dict, List, Optional
 # TASK WEIGHTS  (must sum to 1.0)
 # ─────────────────────────────────────────────────────────────────────────────
 TASK_WEIGHTS: Dict[str, float] = {
-    "classification": 0.18,
-    "prediction":     0.18,
-    "allocation":     0.18,
-    "coordination":   0.20,   # 🔥 boosted
-    "rescue":         0.26,   # 🔥 boosted
+    "classification": 0.20,
+    "prediction":     0.20,
+    "allocation":     0.20,
+    "coordination":   0.15,
+    "rescue":         0.25,
 }
 
 BASE_REWARD      = 0.02    # minimum reward for PRODUCTIVE task actions only

@@ -28,12 +28,15 @@ class ActionType(str, Enum):
 
 
 class ThreatType(str, Enum):
-    AIRSTRIKE = "airstrike"
-    SHIP_ATTACK = "ship_attack"
-    DRONE_THREAT = "drone_threat"
+    INDUSTRIAL_EXPLOSION = "industrial_explosion"
+    COASTAL_FLOOD = "coastal_flood"
+    WILDFIRE_SPREAD = "wildfire_spread"
     EXPLOSION = "explosion"
     FLOOD = "flood"
     FIRE = "fire"
+    AIRSTRIKE = "airstrike"
+    SHIP_ATTACK = "ship_attack"
+    DRONE_THREAT = "drone_threat"
 
 
 class ThreatStatus(str, Enum):
@@ -44,13 +47,15 @@ class ThreatStatus(str, Enum):
 
 
 class ResourceType(str, Enum):
-    MILITARY_UNIT = "military_unit"
+    HEAVY_EQUIPMENT = "heavy_equipment"
     COAST_GUARD = "coast_guard"
-    SWAT_TEAM = "swat_team"
+    HAZMAT_TEAM = "hazmat_team"
     FIRE_BRIGADE = "fire_brigade"
     MEDICAL_TEAM = "medical_team"
     RESCUE_DRONE = "rescue_drone"
     EVACUATION_BUS = "evacuation_bus"
+    MILITARY_UNIT = "military_unit"
+    SWAT_TEAM = "swat_team"
 
 
 class ZoneType(str, Enum):
@@ -110,6 +115,7 @@ class ResourceInfo(BaseModel):
     effectiveness: float = Field(..., ge=0.0, le=1.0, description="Base effectiveness multiplier")
     location_zone: ZoneType = Field(..., description="Zone this resource is stationed in")
     cooldown_steps: int = Field(default=0, ge=0, description="Steps until resource can be reused")
+    distance: float = Field(default=0.0, ge=0.0, description="Distance from incident in km")
 
 
 class AffectedZoneInfo(BaseModel):

@@ -16,8 +16,8 @@ API_URL = "http://localhost:8000"
 
 def run_inference(seed: int) -> float | None:
     """Run inference.py with a specific seed and extract final score."""
-        env = {
-        "API_BASE_URL": API_URL,
+    env = {
+        "ENV_API_URL": API_URL,
         "SEED": str(seed),
         "USE_LLM": "false",
     }
