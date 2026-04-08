@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.10
 
 # Hugging Face Spaces runs as non-root user 1000
 RUN useradd -m -u 1000 appuser
