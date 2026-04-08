@@ -78,6 +78,14 @@ async def env_step(action: Dict[str, Any], session_id: str) -> Dict[str, Any]:
         headers=_env_headers(), timeout=30,
     ).json())
 
+async def env_scores(session_id: str) -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: requests.get(
+        f"{ENV_URL}/scores",
+        params={"session_id": session_id},
+        headers=_env_headers(), timeout=30,
+    ).json())
+
 async def env_state(session_id: str) -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.get(
@@ -190,6 +198,7 @@ async def main() -> None:
         result      = await env_reset(session_id)
         obs         = result.get("observation", {})
         done        = False
+        last_info: Dict[str, Any] = {}
 
         for step in range(1, MAX_STEPS + 1):
             if done:
@@ -201,6 +210,7 @@ async def main() -> None:
             reward  = float(result.get("reward", 0.0))
             done    = bool(result.get("done", False))
             obs     = result.get("observation", obs)
+            last_info = result.get("info", {})
             error   = None
 
             rewards.append(reward)
@@ -210,11 +220,27 @@ async def main() -> None:
 
             log_step(step=step, action=action_str, reward=reward, done=done, error=error)
 
+            # Capture score on every step so we have it when done=true
+            if done or step % 5 == 0:
+                scores_resp = await env_scores(session_id)
+                s = float(scores_resp.get("final_score") or scores_resp.get("final") or 0.0)
+                if s > 0.0:
+                    score = s
+
             if done:
                 break
 
-        state = await env_state(session_id)
-        score = float(state.get("final_score", 0.0))
+        # Get scores BEFORE session expires
+        scores_resp = await env_scores(session_id)
+        score = float(scores_resp.get("final_score") or scores_resp.get("final") or 0.0)
+        if score == 0.0:
+            score = (
+                0.20 * float(scores_resp.get("classification", 0.0)) +
+                0.20 * float(scores_resp.get("prediction",     0.0)) +
+                0.20 * float(scores_resp.get("allocation",     0.0)) +
+                0.15 * float(scores_resp.get("coordination",   0.0)) +
+                0.25 * float(scores_resp.get("rescue",         0.0))
+            )
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
