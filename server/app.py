@@ -14,15 +14,17 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 @app.post("/reset")
-def reset(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """Reset environment and return initial observation."""
+def reset(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
+    """Reset environment and return initial observation. Handles empty body for OpenEnv compliance."""
+    body = body or {}
     task_id = body.get("task_id", "task_easy")
     seed = body.get("seed", None)
     return env.reset(task_id=task_id, seed=seed)
 
 @app.post("/step")
-def step(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """Execute one step in the environment."""
+def step(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
+    """Execute one step in the environment. Handles empty body for OpenEnv compliance."""
+    body = body or {}
     # OpenEnv sends { "action": { ... } }
     action_dict = body.get("action", {})
     return env.step(action_dict)
