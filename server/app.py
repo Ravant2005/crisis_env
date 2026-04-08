@@ -2,66 +2,76 @@ from __future__ import annotations
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Body
 from server.crisis_env_environment import CrisisEnvEnvironment
+from grader import TASK_REGISTRY
 
 app = FastAPI(title="CrisisAI OpenEnv Environment")
 
-# Initialize the mandatory wrapper
 env = CrisisEnvEnvironment()
+
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    """Basic health check for OpenEnv compliance."""
     return {"status": "ok"}
+
 
 @app.post("/reset")
 def reset(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
-    """Reset environment and return initial observation. Handles empty body for OpenEnv compliance."""
-    body = body or {}
-    task_id = body.get("task_id", "task_easy")
-    seed = body.get("seed", None)
+    body       = body or {}
+    task_id    = body.get("task_id", "task_easy")
+    difficulty = body.get("difficulty", TASK_REGISTRY.get(task_id, {}).get("difficulty", "medium"))
+    seed       = body.get("seed", None)
     return env.reset(task_id=task_id, seed=seed)
+
 
 @app.post("/step")
 def step(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
-    """Execute one step in the environment. Handles empty body for OpenEnv compliance."""
-    body = body or {}
-    # OpenEnv sends { "action": { ... } }
+    body        = body or {}
     action_dict = body.get("action", {})
     return env.step(action_dict)
 
+
 @app.get("/state")
 def state() -> Dict[str, Any]:
-    """Expose the full internal environment state."""
     return env.get_full_state()
+
 
 @app.get("/scores")
 def scores() -> Dict[str, float]:
-    """Expose the current task scores directly for grading."""
-    return env.task_scores()
+    raw = env.task_scores()
+    final = (
+        0.20 * raw.get("classification", 0.0) +
+        0.20 * raw.get("prediction",     0.0) +
+        0.20 * raw.get("allocation",     0.0) +
+        0.15 * raw.get("coordination",   0.0) +
+        0.25 * raw.get("rescue",         0.0)
+    )
+    return {**raw, "final": round(final, 4), "final_score": round(final, 4)}
+
 
 @app.get("/tasks")
 def tasks() -> Dict[str, Any]:
-    """List available tasks for this environment."""
+    """
+    Returns all registered tasks with grader metadata.
+    The platform validates that at least 3 tasks have grader_range [0.0, 1.0].
+    """
     return {
         "tasks": [
-            {"id": "task_easy", "description": "Classification focused", "grader_range": [0.0, 1.0]},
-            {"id": "task_medium", "description": "Prediction focused", "grader_range": [0.0, 1.0]},
-            {"id": "task_medium_plus", "description": "Allocation focused", "grader_range": [0.0, 1.0]},
-            {"id": "task_hard", "description": "Coordination focused", "grader_range": [0.0, 1.0]},
-            {"id": "task_advanced", "description": "Rescue focused", "grader_range": [0.0, 1.0]},
+            {
+                "id":           info["id"],
+                "name":         info["name"],
+                "difficulty":   info["difficulty"],
+                "description":  info["description"],
+                "grader_range": info["grader_range"],
+                "inbox_size":   info.get("inbox_size", 10),
+            }
+            for info in TASK_REGISTRY.values()
         ]
     }
 
 
 def main():
-    """Entry point for multi-mode deployment."""
     import uvicorn
-    uvicorn.run(
-        "server.app:app",
-        host="0.0.0.0",
-        port=7860,
-        reload=False
-    )
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
 
 
 if __name__ == "__main__":
