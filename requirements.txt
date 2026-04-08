@@ -4,7 +4,7 @@ uvicorn[standard]==0.30.1
 websockets==12.0
 
 # OpenEnv core framework
-openenv-core>=0.2.0
+openenv-core
 
 # Validation
 pydantic==2.7.1
