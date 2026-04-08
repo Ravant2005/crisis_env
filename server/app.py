@@ -81,19 +81,6 @@ def state() -> Dict[str, Any]:
     return env.get_full_state()
 
 
-@app.get("/scores", tags=["OpenEnv"])
-def scores() -> Dict[str, float]:
-    raw = env.task_scores()
-    final = (
-        0.20 * raw.get("classification", 0.0) +
-        0.20 * raw.get("prediction",     0.0) +
-        0.20 * raw.get("allocation",     0.0) +
-        0.15 * raw.get("coordination",   0.0) +
-        0.25 * raw.get("rescue",         0.0)
-    )
-    return {**raw, "final": round(final, 4), "final_score": round(final, 4)}
-
-
 def main():
     import uvicorn
     uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
