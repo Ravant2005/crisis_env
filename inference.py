@@ -33,8 +33,8 @@ from openai import OpenAI
 # MODEL_NAME   : model identifier for LLM calls
 # HF_TOKEN     : Hugging Face token (optional fallback)
 # LOCAL_IMAGE_NAME : optional, for from_docker_image()
-API_BASE_URL:     str           = os.environ["API_BASE_URL"]                        # required — no default
-API_KEY:          str           = os.environ.get("API_KEY", os.environ.get("HF_TOKEN", "EMPTY"))  # evaluator injects API_KEY
+API_BASE_URL:     str           = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")  # LiteLLM proxy
+API_KEY:          str           = os.getenv("API_KEY", os.getenv("HF_TOKEN", "EMPTY"))           # evaluator injects API_KEY
 MODEL_NAME:       str           = os.getenv("MODEL_NAME",  "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN:         Optional[str] = os.getenv("HF_TOKEN")           # no default
 LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")   # for from_docker_image()
@@ -180,8 +180,8 @@ async def _llm_suggest_priority(threats: List[Dict[str, Any]], client: OpenAI) -
         )
         ids = json.loads(response.choices[0].message.content.strip())
         if isinstance(ids, list): return ids
-    except:
-        pass
+    except Exception as llm_err:
+        print(f"[LLM_FALLBACK] {llm_err}", flush=True)
     return [t["threat_id"] for t in sorted(active, key=_priority_score, reverse=True)]
 
 # ─────────────────────────────────────────────
@@ -192,7 +192,11 @@ async def main() -> None:
     session_id = f"episode_{uuid.uuid4().hex[:8]}"
     
     # OpenAI client — uses evaluator-injected API_BASE_URL + API_KEY (LiteLLM proxy)
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    # Ensure base_url ends with /v1 as required by OpenAI client
+    llm_base_url = API_BASE_URL.rstrip("/")
+    if not llm_base_url.endswith("/v1"):
+        llm_base_url = llm_base_url + "/v1"
+    client = OpenAI(base_url=llm_base_url, api_key=API_KEY)
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
