@@ -115,11 +115,8 @@ tasks:
     name: Threat Classification
     difficulty: easy
     action: classify
-    grader:
-      name: classification_score
-      endpoint: /scores
-      field: classification
-      score_range: [0.0, 1.0]
+    grader: classification_score
+    score_range: [0.0, 1.0]
     weight: 0.20
     description: >
       Correctly identify the type and severity of each active threat.
@@ -129,11 +126,8 @@ tasks:
     name: Impact Prediction
     difficulty: medium
     action: predict
-    grader:
-      name: prediction_score
-      endpoint: /scores
-      field: prediction
-      score_range: [0.0, 1.0]
+    grader: prediction_score
+    score_range: [0.0, 1.0]
     weight: 0.20
     description: >
       Predict time-to-impact and population affected for each threat.
@@ -143,11 +137,8 @@ tasks:
     name: Resource Allocation
     difficulty: medium
     action: allocate
-    grader:
-      name: allocation_score
-      endpoint: /scores
-      field: allocation
-      score_range: [0.0, 1.0]
+    grader: allocation_score
+    score_range: [0.0, 1.0]
     weight: 0.20
     description: >
       Assign the most effective zone-matched resource to each threat.
@@ -157,11 +148,8 @@ tasks:
     name: Multi-Threat Coordination
     difficulty: hard
     action: coordinate
-    grader:
-      name: coordination_score
-      endpoint: /scores
-      field: coordination
-      score_range: [0.0, 1.0]
+    grader: coordination_score
+    score_range: [0.0, 1.0]
     weight: 0.15
     description: >
       Set optimal priority ordering across all simultaneous threats.
@@ -171,11 +159,8 @@ tasks:
     name: Rescue Optimisation
     difficulty: hard
     action: rescue
-    grader:
-      name: rescue_score
-      endpoint: /scores
-      field: rescue
-      score_range: [0.0, 1.0]
+    grader: rescue_score
+    score_range: [0.0, 1.0]
     weight: 0.25
     description: >
       Deploy rescue units into impacted zones to maximise lives saved.

@@ -137,6 +137,7 @@ async def list_tasks():
                 "action_type": ActionType.CLASSIFY,
                 "grader":      "classification_score",
                 "grader_range": [0.0, 1.0],
+                "score_range": [0.0, 1.0],
                 "description": "Identify the type and severity of each active threat. Score = 0.70 × correct_ratio + 0.30 × severity_accuracy.",
             },
             {
@@ -146,6 +147,7 @@ async def list_tasks():
                 "action_type": ActionType.PREDICT,
                 "grader":      "prediction_score",
                 "grader_range": [0.0, 1.0],
+                "score_range": [0.0, 1.0],
                 "description": "Predict time-to-impact and population affected. Score = 1.0 - (0.5 × tti_err + 0.5 × pop_err).",
             },
             {
@@ -155,6 +157,7 @@ async def list_tasks():
                 "action_type": ActionType.ALLOCATE,
                 "grader":      "allocation_score",
                 "grader_range": [0.0, 1.0],
+                "score_range": [0.0, 1.0],
                 "description": "Assign zone-matched resources to threats. Score = 0.45 × effectiveness + 0.30 × zone_affinity + 0.15 × budget_efficiency.",
             },
             {
@@ -164,6 +167,7 @@ async def list_tasks():
                 "action_type": ActionType.COORDINATE,
                 "grader":      "coordination_score",
                 "grader_range": [0.0, 1.0],
+                "score_range": [0.0, 1.0],
                 "description": "Rank threats by priority. Score = rank_correlation(agent_order, ideal_order).",
             },
             {
@@ -173,6 +177,7 @@ async def list_tasks():
                 "action_type": ActionType.RESCUE,
                 "grader":      "rescue_score",
                 "grader_range": [0.0, 1.0],
+                "score_range": [0.0, 1.0],
                 "description": "Deploy rescue units to save victims. Score = 0.65 × saved_ratio + 0.20 × speed_score + 0.15 × resource_efficiency.",
             },
         ]
