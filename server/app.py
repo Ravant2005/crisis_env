@@ -121,8 +121,82 @@ async def root():
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Liveness probe — required for HuggingFace Space automated validation."""
-    return {"status": "ok", "service": "crisis-response-openenv", "version": "1.0.0"}
+    """Liveness probe — required by OpenEnv spec."""
+    return {"status": "healthy", "service": "crisis-response-openenv", "version": "1.0.0"}
+
+
+@app.get("/metadata", tags=["OpenEnv"])
+async def metadata():
+    """Environment metadata — required by OpenEnv spec."""
+    return {
+        "name":        "CrisisAI: AI Crisis Response & Rescue Coordination",
+        "description": "An OpenEnv-compliant RL environment for AI-driven multi-threat emergency coordination under partial observability and tight resource constraints.",
+        "version":     "1.0.0",
+        "tasks": [
+            {"id": 1, "name": "Threat Classification",    "grader": "classification_score", "score_range": [0.0, 1.0]},
+            {"id": 2, "name": "Impact Prediction",        "grader": "prediction_score",     "score_range": [0.0, 1.0]},
+            {"id": 3, "name": "Resource Allocation",      "grader": "allocation_score",     "score_range": [0.0, 1.0]},
+            {"id": 4, "name": "Multi-Threat Coordination", "grader": "coordination_score",  "score_range": [0.0, 1.0]},
+            {"id": 5, "name": "Rescue Optimisation",      "grader": "rescue_score",         "score_range": [0.0, 1.0]},
+        ],
+    }
+
+
+@app.get("/schema", tags=["OpenEnv"])
+async def schema():
+    """Action, observation and state schemas — required by OpenEnv spec."""
+    return {
+        "action": {
+            "type": "object",
+            "properties": {
+                "action_type": {"type": "string", "enum": ["classify", "predict", "allocate", "coordinate", "rescue", "delay", "skip"]},
+                "classification": {"type": "object"},
+                "prediction":     {"type": "object"},
+                "allocation":     {"type": "object"},
+                "coordination":   {"type": "object"},
+                "rescue":         {"type": "object"},
+            },
+            "required": ["action_type"],
+        },
+        "observation": {
+            "type": "object",
+            "properties": {
+                "threats":                   {"type": "array"},
+                "resources":                 {"type": "array"},
+                "affected_zones":            {"type": "array"},
+                "time_remaining":            {"type": "integer"},
+                "resource_budget_remaining": {"type": "integer"},
+                "alerts":                    {"type": "array"},
+                "valid_actions":             {"type": "object"},
+            },
+        },
+        "state": {
+            "type": "object",
+            "properties": {
+                "classification_score": {"type": "number"},
+                "prediction_score":     {"type": "number"},
+                "allocation_score":     {"type": "number"},
+                "coordination_score":   {"type": "number"},
+                "rescue_score":         {"type": "number"},
+                "final_score":          {"type": "number"},
+                "done":                 {"type": "boolean"},
+            },
+        },
+    }
+
+
+@app.post("/mcp", tags=["OpenEnv"])
+async def mcp_endpoint(body: Dict[str, Any] = None):
+    """MCP JSON-RPC endpoint — required by OpenEnv spec."""
+    body = body or {}
+    method = body.get("method", "")
+    req_id = body.get("id", 1)
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "crisis-response-openenv", "version": "1.0.0"}}
+        }
+    return {"jsonrpc": "2.0", "id": req_id, "result": {"status": "ok"}}
 
 
 @app.get("/tasks", tags=["OpenEnv"])
