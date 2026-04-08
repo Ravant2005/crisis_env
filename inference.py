@@ -27,25 +27,26 @@ from openai import OpenAI
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-# ── Mandatory submission variables ──────────────────────────────────────────
-# API_BASE_URL : LLM API endpoint (OpenAI-compatible)
+# ── Mandatory submission variables (injected by evaluator) ───────────────────
+# API_BASE_URL : LLM proxy endpoint (LiteLLM)
+# API_KEY      : LiteLLM proxy key (injected by evaluator)
 # MODEL_NAME   : model identifier for LLM calls
-# HF_TOKEN     : Hugging Face / API key (no default)
+# HF_TOKEN     : Hugging Face token (optional fallback)
 # LOCAL_IMAGE_NAME : optional, for from_docker_image()
-API_BASE_URL:     str           = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_BASE_URL:     str           = os.environ["API_BASE_URL"]                        # required — no default
+API_KEY:          str           = os.environ.get("API_KEY", os.environ.get("HF_TOKEN", "EMPTY"))  # evaluator injects API_KEY
 MODEL_NAME:       str           = os.getenv("MODEL_NAME",  "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN:         Optional[str] = os.getenv("HF_TOKEN")           # no default
 LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")   # for from_docker_image()
 
-# ── Environment server URL (separate from LLM API) ───────────────────────────
-# The evaluator sets this to point at the running OpenEnv server.
+# ── Environment server URL (separate from LLM proxy) ─────────────────────────
 ENV_URL: str = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space")
 
 # ── Project-specific variables ────────────────────────────────────────────────
 TASK_NAME:       str  = os.getenv("MY_ENV_V4_TASK",      "crisis-response")
 BENCHMARK:       str  = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
 SEED:            int  = int(os.getenv("SEED", "42"))
-USE_LLM:         bool = os.getenv("USE_LLM", "false").lower() == "true"
+USE_LLM:         bool = True   # always use LLM — required by evaluator to hit the proxy
 RECOORD_INTERVAL      = 12
 
 # ─────────────────────────────────────────────
@@ -190,8 +191,8 @@ async def _llm_suggest_priority(threats: List[Dict[str, Any]], client: OpenAI) -
 async def main() -> None:
     session_id = f"episode_{uuid.uuid4().hex[:8]}"
     
-    # OpenAI client — uses API_BASE_URL (LLM endpoint) + HF_TOKEN per submission spec
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN if HF_TOKEN else "EMPTY")
+    # OpenAI client — uses evaluator-injected API_BASE_URL + API_KEY (LiteLLM proxy)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
