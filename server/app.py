@@ -51,3 +51,18 @@ def tasks() -> Dict[str, Any]:
             {"id": "task_advanced", "description": "Rescue focused", "grader_range": [0.0, 1.0]},
         ]
     }
+
+
+def main():
+    """Entry point for multi-mode deployment."""
+    import uvicorn
+    uvicorn.run(
+        "server.app:app",
+        host="0.0.0.0",
+        port=7860,
+        reload=False
+    )
+
+
+if __name__ == "__main__":
+    main()
