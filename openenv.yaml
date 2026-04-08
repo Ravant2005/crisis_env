@@ -1,28 +1,47 @@
-spec_version: 1
-name: crisis_env
-
-runtime: fastapi
-app: server.app:app
-port: 7860
+name: CrisisAI OpenEnv Environment
+version: "1.0.0"
+description: >
+  OpenEnv RL environment for AI Crisis Response & Rescue Coordination.
+  3 difficulty tasks covering threat classification, impact prediction,
+  and full crisis response.
 
 environment:
-  entry_point: server.app:app
+  type: openenv
+  base_url: https://praveen4278-crisis-ai-env.hf.space
+  health_endpoint: /health
+
+endpoints:
+  reset:
+    method: POST
+    path: /reset
+  step:
+    method: POST
+    path: /step
+  state:
+    method: GET
+    path: /state
+  tasks:
+    method: GET
+    path: /tasks
+  health:
+    method: GET
+    path: /health
 
 tasks:
   - id: task_easy
-    grader: grade_task_easy
+    name: Threat Classification
+    difficulty: easy
+    description: Classify incoming threats by type and severity.
+    grader_range: [0.0, 1.0]
 
   - id: task_medium
-    grader: grade_task_medium
-
-  - id: task_medium_plus
-    grader: grade_task_medium_plus
+    name: Impact Prediction
+    difficulty: medium
+    description: Predict time-to-impact and population-at-risk for each threat.
+    grader_range: [0.0, 1.0]
 
   - id: task_hard
-    grader: grade_task_hard
-
-  - id: task_advanced
-    grader: grade_task_advanced
-
-grading:
-  module: grader
+    name: Full Crisis Response
+    difficulty: hard
+    description: Allocate resources, coordinate priorities, and execute rescue operations.
+    grader_range: [0.0, 1.0]
