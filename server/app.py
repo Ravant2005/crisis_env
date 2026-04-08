@@ -1,7 +1,8 @@
 """
 server/app.py — FastAPI server for the AI Crisis Response & Rescue Coordination Environment.
 Implements the full OpenEnv server protocol:
-  REST:      POST /reset  |  POST /step  |  GET /state  |  GET /health  |  GET /tasks
+  REST:      GET /  |  GET /health  |  GET /tasks  |  GET /state  |  GET /scores
+             POST /reset  |  POST /step
   WebSocket: /ws  (primary agentic interface)
 """
 
@@ -16,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-# Ensure project root is importable when running from server/
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -51,7 +51,6 @@ app.add_middleware(
 
 # ─────────────────────────────────────────────
 # GLOBAL ENVIRONMENT REGISTRY
-# One environment per session_id (WebSocket) or a default for REST.
 # ─────────────────────────────────────────────
 
 _environments: Dict[str, CrisisEnvironment] = {}
@@ -99,6 +98,27 @@ def _error_response(code: str, message: str) -> Dict[str, Any]:
 # REST ENDPOINTS
 # ─────────────────────────────────────────────
 
+@app.get("/", tags=["System"])
+async def root():
+    """Root endpoint — required for Hugging Face Space validation."""
+    return {
+        "name":        "CrisisAI: AI Crisis Response & Rescue Coordination",
+        "version":     "1.0.0",
+        "status":      "running",
+        "description": "OpenEnv-compliant RL environment for multi-threat emergency coordination.",
+        "endpoints": {
+            "health": "GET  /health",
+            "reset":  "POST /reset",
+            "step":   "POST /step",
+            "state":  "GET  /state",
+            "scores": "GET  /scores",
+            "tasks":  "GET  /tasks",
+            "ws":     "WS   /ws",
+            "docs":   "GET  /docs",
+        },
+    }
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
     """Liveness probe — required for HuggingFace Space automated validation."""
@@ -107,16 +127,13 @@ async def health_check():
 
 @app.get("/tasks", tags=["OpenEnv"])
 async def list_tasks():
-    """
-    Return all task definitions with grader metadata.
-    Required for OpenEnv spec compliance.
-    """
+    """Return all task definitions with grader metadata."""
     return {
         "tasks": [
             {
-                "task_id":    1,
-                "name":       "Threat Classification",
-                "difficulty": "easy",
+                "task_id":     1,
+                "name":        "Threat Classification",
+                "difficulty":  "easy",
                 "action_type": ActionType.CLASSIFY,
                 "description": (
                     "Identify the type and severity of each active threat. "
@@ -125,9 +142,9 @@ async def list_tasks():
                 "grader_range": [0.0, 1.0],
             },
             {
-                "task_id":    2,
-                "name":       "Impact Prediction",
-                "difficulty": "medium",
+                "task_id":     2,
+                "name":        "Impact Prediction",
+                "difficulty":  "medium",
                 "action_type": ActionType.PREDICT,
                 "description": (
                     "Predict the time-to-impact and population affected for each threat. "
@@ -136,9 +153,9 @@ async def list_tasks():
                 "grader_range": [0.0, 1.0],
             },
             {
-                "task_id":    3,
-                "name":       "Resource Allocation",
-                "difficulty": "medium_plus",
+                "task_id":     3,
+                "name":        "Resource Allocation",
+                "difficulty":  "medium_plus",
                 "action_type": ActionType.ALLOCATE,
                 "description": (
                     "Assign the best available resource unit to each threat, "
@@ -148,9 +165,9 @@ async def list_tasks():
                 "grader_range": [0.0, 1.0],
             },
             {
-                "task_id":    4,
-                "name":       "Multi-Threat Coordination",
-                "difficulty": "hard",
+                "task_id":     4,
+                "name":        "Multi-Threat Coordination",
+                "difficulty":  "hard",
                 "action_type": ActionType.COORDINATE,
                 "description": (
                     "Set a global priority ordering across all active threats. "
@@ -159,9 +176,9 @@ async def list_tasks():
                 "grader_range": [0.0, 1.0],
             },
             {
-                "task_id":    5,
-                "name":       "Rescue Optimisation",
-                "difficulty": "advanced",
+                "task_id":     5,
+                "name":        "Rescue Optimisation",
+                "difficulty":  "advanced",
                 "action_type": ActionType.RESCUE,
                 "description": (
                     "Deploy rescue units into impacted zones to save victims. "
@@ -196,10 +213,10 @@ async def step_endpoint(body: Dict[str, Any]):
     Body: { "action": <CrisisAction>, "session_id": <str> (optional) }
     Returns: { observation, reward, done, info }
     """
-    session_id = body.get("session_id", _DEFAULT_SESSION)
-    env        = _get_env(session_id)
-
+    session_id  = body.get("session_id", _DEFAULT_SESSION)
+    env         = _get_env(session_id)
     action_data = body.get("action")
+
     if action_data is None:
         raise HTTPException(status_code=422, detail="Missing 'action' field in request body.")
 
@@ -214,10 +231,7 @@ async def step_endpoint(body: Dict[str, Any]):
 
 @app.get("/state", tags=["OpenEnv"])
 async def state_endpoint(session_id: str = _DEFAULT_SESSION):
-    """
-    Return the current episode state and all task grader scores.
-    Query param: session_id (default='default')
-    """
+    """Return the current episode state and all task grader scores."""
     env   = _get_env(session_id)
     state = env.state()
     return _state_to_dict(state)
@@ -225,10 +239,7 @@ async def state_endpoint(session_id: str = _DEFAULT_SESSION):
 
 @app.get("/scores", tags=["OpenEnv"])
 async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
-    """
-    Convenience endpoint returning only the grader scores for all 5 tasks.
-    Used by automated evaluation harness.
-    """
+    """Convenience endpoint returning only the grader scores for all 5 tasks."""
     env   = _get_env(session_id)
     state = env.state()
     return {
@@ -247,33 +258,12 @@ async def scores_endpoint(session_id: str = _DEFAULT_SESSION):
 # ─────────────────────────────────────────────
 # WEBSOCKET — PRIMARY AGENTIC INTERFACE  (/ws)
 # ─────────────────────────────────────────────
-# Protocol (JSON messages):
-#
-#  Client → Server:
-#    { "command": "reset",  "seed": <int|null>  }
-#    { "command": "step",   "action": { ... }   }
-#    { "command": "state"                        }
-#    { "command": "tasks"                        }
-#    { "command": "ping"                         }
-#
-#  Server → Client:
-#    { "type": "observation", "data": { ... } }
-#    { "type": "step_result", "data": { ... } }
-#    { "type": "state",       "data": { ... } }
-#    { "type": "tasks",       "data": { ... } }
-#    { "type": "pong"                         }
-#    { "type": "error",       "data": { ... } }
-# ─────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    Primary WebSocket interface for agentic interaction.
-    Each connection gets its own isolated environment instance.
-    """
+    """Primary WebSocket interface for agentic interaction."""
     await websocket.accept()
 
-    # Each WS connection gets a dedicated environment
     session_id = f"ws_{id(websocket)}"
     env        = _new_env(session_id=session_id)
 
@@ -287,7 +277,6 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             raw = await websocket.receive_text()
 
-            # ── Parse incoming message ─────────────────────────────────────
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -296,18 +285,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
             command = msg.get("command", "").strip().lower()
 
-            # ── PING ──────────────────────────────────────────────────────
             if command == "ping":
                 await send("pong")
 
-            # ── RESET ─────────────────────────────────────────────────────
             elif command == "reset":
                 seed = msg.get("seed", None)
                 env  = _new_env(session_id=session_id, seed=seed)
                 obs  = env.reset()
                 await send("observation", _obs_to_dict(obs))
 
-            # ── STEP ──────────────────────────────────────────────────────
             elif command == "step":
                 action_data = msg.get("action")
                 if not action_data:
@@ -325,30 +311,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     result = env.step(action)
                     await send("step_result", _step_to_dict(result))
-
-                    # Auto-send final state when episode ends
                     if result.done:
-                        state = env.state()
-                        await send("state", _state_to_dict(state))
-
+                        await send("state", _state_to_dict(env.state()))
                 except Exception as exc:
                     await send("error", _error_response(
                         "STEP_ERROR", f"Simulation error: {exc}\n{traceback.format_exc()}"
                     ))
 
-            # ── STATE ─────────────────────────────────────────────────────
             elif command == "state":
-                state = env.state()
-                await send("state", _state_to_dict(state))
+                await send("state", _state_to_dict(env.state()))
 
-            # ── TASKS ─────────────────────────────────────────────────────
             elif command == "tasks":
                 tasks_resp = await list_tasks()
                 await send("tasks", tasks_resp)
 
-            # ── SCORES ────────────────────────────────────────────────────
             elif command == "scores":
-                env = _get_env(session_id)
                 task_scores = env.task_scores()
                 st = env.state()
                 await send("scores", {
@@ -360,22 +337,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     "final":          round(st.final_score, 4),
                 })
 
-            # ── UNKNOWN ───────────────────────────────────────────────────
             else:
                 await send("error", _error_response(
                     "UNKNOWN_COMMAND",
-                    f"Unknown command '{command}'. Valid: reset, step, state, tasks, ping."
+                    f"Unknown command '{command}'. Valid: reset, step, state, tasks, scores, ping."
                 ))
 
     except WebSocketDisconnect:
-        # Clean up environment on disconnect
         _environments.pop(session_id, None)
 
     except Exception as exc:
         try:
-            await send("error", _error_response(
-                "FATAL_ERROR", f"Unexpected server error: {exc}"
-            ))
+            await send("error", _error_response("FATAL_ERROR", f"Unexpected server error: {exc}"))
         except Exception:
             pass
         finally:
@@ -398,22 +371,17 @@ async def http_exception_handler(request, exc: HTTPException):
 async def generic_exception_handler(request, exc: Exception):
     return JSONResponse(
         status_code=500,
-        content={
-            "status":  "error",
-            "code":    "INTERNAL_ERROR",
-            "message": str(exc),
-        },
+        content={"status": "error", "code": "INTERNAL_ERROR", "message": str(exc)},
     )
 
 
 # ─────────────────────────────────────────────
-# ENTRY POINT (for local dev)
+# ENTRY POINT
 # ─────────────────────────────────────────────
 
 def main():
-    """Entry point for the server (used by [project.scripts] in pyproject.toml)."""
     import uvicorn
-    uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
 
 
 if __name__ == "__main__":

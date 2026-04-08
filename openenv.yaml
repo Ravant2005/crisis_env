@@ -1,74 +1,114 @@
 name: crisis_response_env
 version: "1.0"
 description: >
-  AI Crisis Response & Rescue Coordination Environment.
-  Models FEMA-style disaster response coordination — classify incidents, predict impact timelines,
-  allocate first-responder units, coordinate multi-incident triage, and optimize victim rescue.
+  CrisisAI: AI Crisis Response & Rescue Coordination Environment.
+  A real-world OpenEnv environment where an AI agent must simultaneously classify
+  threats, predict impact, allocate resources, coordinate multi-threat response,
+  and optimise rescue operations to maximise lives saved and minimise casualties.
 
 author: crisis-response-team
 tags:
   - openenv
   - crisis-management
-  - multi-agent
   - rescue
   - real-world
   - reinforcement-learning
+  - multi-task
 
 environment:
   entry_point: server.app:app
   host: 0.0.0.0
-  port: 8000
+  port: 7860
   protocol: http+websocket
 
 endpoints:
+  root:    GET  /
+  health:  GET  /health
   reset:   POST /reset
   step:    POST /step
   state:   GET  /state
-  health:  GET  /health
-  tasks:   GET  /tasks
   scores:  GET  /scores
+  tasks:   GET  /tasks
   ws:      WS   /ws
+  docs:    GET  /docs
 
 observation_space:
   type: structured
   fields:
     threats:
       type: list[ThreatInfo]
-      description: All active, impacted, and resolved threats
+      description: All active, impacted, and resolved threats with noisy observations
     resources:
       type: list[ResourceInfo]
-      description: Available and assigned resource units
+      description: Available and assigned resource units with cooldown state
     affected_zones:
       type: list[AffectedZoneInfo]
-      description: Post-impact zones requiring rescue
+      description: Post-impact zones requiring rescue operations
     time_remaining:
       type: int
       description: Steps remaining in the current episode
+    resource_budget_remaining:
+      type: int
+      description: Global resource budget units left
     alerts:
       type: list[str]
       description: Human-readable event log for the last step
+    valid_actions:
+      type: dict
+      description: Action mask and valid IDs for RL agents
 
 action_space:
   type: structured
   actions:
     - name: classify
-      description: Identify threat type and severity
+      description: Identify threat type and severity from noisy observations
       payload: ClassificationPayload
+      fields:
+        - threat_id: int
+        - predicted_type: ThreatType
+        - predicted_severity: float (0.0–10.0)
+
     - name: predict
       description: Predict time-to-impact and population affected
       payload: PredictionPayload
+      fields:
+        - threat_id: int
+        - predicted_tti: int
+        - predicted_pop: int
+
     - name: allocate
       description: Assign a resource unit to a threat
       payload: AllocationPayload
+      fields:
+        - threat_id: int
+        - resource_id: int
+
     - name: coordinate
       description: Set global priority ordering across all active threats
       payload: CoordinationPayload
+      fields:
+        - priority_order: list[int]
+
     - name: rescue
       description: Deploy rescue units into an impacted zone
       payload: RescuePayload
+      fields:
+        - zone_id: int
+        - rescue_units_to_send: int (1–5)
+
+    - name: delay
+      description: Attempt to delay a threat's time-to-impact
+      payload: DelayPayload
+      fields:
+        - threat_id: int
+        - delay_steps: int (1–3)
+
     - name: evacuate
       description: Proactive evacuation before impact to reduce casualties
       payload: EvacuationPayload
+      fields:
+        - zone_id: int
+        - evac_units: int
 
 tasks:
   - id: 1
@@ -77,69 +117,104 @@ tasks:
     action: classify
     grader: classification_score
     score_range: [0.0, 1.0]
+    weight: 0.20
     description: >
       Correctly identify the type and severity of each active threat.
-      Score = 0.55 × exact_match + 0.25 × domain_match + 0.20 × severity_accuracy.
+      Score = 0.70 × correct_ratio + 0.30 × severity_accuracy.
+
   - id: 2
     name: Impact Prediction
     difficulty: medium
     action: predict
     grader: prediction_score
     score_range: [0.0, 1.0]
+    weight: 0.20
     description: >
       Predict time-to-impact and population affected for each threat.
-      Score = 0.50 × Gaussian(TTI_error) + 0.50 × Gaussian(population_log_ratio).
+      Score = 1.0 - (0.5 × mean(tti_err_normalized) + 0.5 × mean(pop_err_normalized)).
+
   - id: 3
     name: Resource Allocation
     difficulty: medium
     action: allocate
     grader: allocation_score
     score_range: [0.0, 1.0]
+    weight: 0.20
     description: >
       Assign the most effective zone-matched resource to each threat.
-      Score = 0.45 × type_compatibility + 0.30 × intercept_prob + 0.15 × budget_efficiency + 0.10 × proximity.
+      Score = 0.45 × effectiveness + 0.30 × zone_affinity + 0.15 × budget_efficiency - waste_penalty.
+
   - id: 4
     name: Multi-Threat Coordination
     difficulty: hard
     action: coordinate
     grader: coordination_score
     score_range: [0.0, 1.0]
+    weight: 0.15
     description: >
       Set optimal priority ordering across all simultaneous threats.
-      Score = 0.30 × coverage + 0.30 × priority_ordering + 0.20 × simultaneous_bonus + 0.20 × casualties_avoided.
+      Score = mean(rank_correlation(agent_order, ideal_order)) - wrong_priority_penalty.
+
   - id: 5
     name: Rescue Optimisation
     difficulty: hard
     action: rescue
     grader: rescue_score
     score_range: [0.0, 1.0]
+    weight: 0.25
     description: >
       Deploy rescue units into impacted zones to maximise lives saved.
-      Score = 0.40 × victims_saved + 0.25 × unit_efficiency + 0.20 × speed_score + 0.15 × unit_type_match.
+      Score = (0.65 × saved_ratio + 0.20 × speed_score + 0.15 × resource_efficiency) × urgency.
+
 reward:
-  internal_range: [-inf, +inf]
+  equation: >
+    step_reward = (task_progress × 2.5) + handler_bonus + 0.15 × budget_efficiency
+                  - 0.20 × time_fraction - 0.35 × invalid_action - 0.25 × waste_fraction
+  clip_range: [-0.15, 0.85]
   final_score_range: [0.0, 1.0]
-  shaping:
-    - correct_classification:    +1.0 to +1.5 (dense progress)
-    - accurate_prediction:       +1.0 to +1.3
-    - good_allocation:           +1.0 to +2.0 (zone/priority boosted)
-    - good_coordination:         +1.0 to +2.0
-    - rescue_save:               +1.5 to +3.0 (saved_ratio*0.75)
-    - threat_contained:          +3.0
-    - baseline_step:             +0.10 (anti-zero rewards)
-    - terminal_bonus:            +2.0 * final_score
+  final_score_weights:
+    classification: 0.20
+    prediction:     0.20
+    allocation:     0.20
+    coordination:   0.15
+    rescue:         0.25
 
 episode:
   max_steps: 30
-  easy_steps: 22
-  medium_steps: 26
-  hard_steps: 30
-  simultaneous_threats: 3
   difficulty_profiles:
-    easy:   { threats: 2, obs_noise: 0.08, budget: 10 }
-    medium: { threats: 3, obs_noise: 0.16, budget: 9 }
-    hard:   { threats: 4, obs_noise: 0.24, budget: 8 }
+    easy:
+      threats: 2
+      obs_noise: 0.08
+      escalation_prob: 0.08
+      spread_prob: 0.05
+      budget: 10
+      episode_steps: 22
+    medium:
+      threats: 3
+      obs_noise: 0.16
+      escalation_prob: 0.15
+      spread_prob: 0.12
+      budget: 9
+      episode_steps: 26
+    hard:
+      threats: 4
+      obs_noise: 0.24
+      escalation_prob: 0.23
+      spread_prob: 0.20
+      budget: 8
+      episode_steps: 30
   resource_units: 8
+
+baseline:
+  script: inference.py
+  seed: 42
+  scores:
+    classification: 1.0000
+    prediction:     0.0000
+    allocation:     0.0000
+    coordination:   1.0000
+    rescue:         0.8198
+    final:          0.5640
 
 inference:
   script: inference.py
@@ -150,4 +225,4 @@ inference:
     - SEED
     - USE_LLM
   runtime_limit_minutes: 20
-  machine: vcpu=2, memory=8gb
+  machine: "vcpu=2, memory=8gb"

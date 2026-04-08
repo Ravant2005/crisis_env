@@ -27,18 +27,26 @@ from openai import OpenAI
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-# Mandatory variables for submission
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME:   str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN:     str = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+# ── Mandatory submission variables ──────────────────────────────────────────
+# API_BASE_URL : LLM API endpoint (OpenAI-compatible)
+# MODEL_NAME   : model identifier for LLM calls
+# HF_TOKEN     : Hugging Face / API key (no default)
+# LOCAL_IMAGE_NAME : optional, for from_docker_image()
+API_BASE_URL:     str           = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME:       str           = os.getenv("MODEL_NAME",  "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN:         Optional[str] = os.getenv("HF_TOKEN")           # no default
+LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")   # for from_docker_image()
 
-# Project-specific variables
-ENV_API_URL:  str = os.getenv("ENV_API_URL", "http://localhost:8000")
-TASK_NAME:    str = os.getenv("MY_ENV_V4_TASK", "crisis-response")
-BENCHMARK:    str = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
-SEED:         int = int(os.getenv("SEED", "42"))
-USE_LLM:      bool = os.getenv("USE_LLM", "true").lower() == "true"
-RECOORD_INTERVAL = 12
+# ── Environment server URL (separate from LLM API) ───────────────────────────
+# The evaluator sets this to point at the running OpenEnv server.
+ENV_URL: str = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space")
+
+# ── Project-specific variables ────────────────────────────────────────────────
+TASK_NAME:       str  = os.getenv("MY_ENV_V4_TASK",      "crisis-response")
+BENCHMARK:       str  = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
+SEED:            int  = int(os.getenv("SEED", "42"))
+USE_LLM:         bool = os.getenv("USE_LLM", "false").lower() == "true"
+RECOORD_INTERVAL      = 12
 
 # ─────────────────────────────────────────────
 # LOGGING UTILS
@@ -72,7 +80,7 @@ def _headers() -> Dict[str, str]:
 async def http_reset(seed: int = SEED, difficulty: str = "medium", session_id: str = "test_session") -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.post(
-        f"{ENV_API_URL}/reset",
+        f"{ENV_URL}/reset",
         json={"seed": seed, "difficulty": difficulty, "session_id": session_id},
         headers=_headers(),
         timeout=30,
@@ -81,7 +89,7 @@ async def http_reset(seed: int = SEED, difficulty: str = "medium", session_id: s
 async def http_step(action: Dict[str, Any], session_id: str = "test_session") -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.post(
-        f"{ENV_API_URL}/step",
+        f"{ENV_URL}/step",
         json={"action": action, "session_id": session_id},
         headers=_headers(),
         timeout=30,
@@ -90,7 +98,7 @@ async def http_step(action: Dict[str, Any], session_id: str = "test_session") ->
 async def http_state(session_id: str = "test_session") -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.get(
-        f"{ENV_API_URL}/state",
+        f"{ENV_URL}/state",
         params={"session_id": session_id},
         headers=_headers(),
         timeout=30,
@@ -182,12 +190,8 @@ async def _llm_suggest_priority(threats: List[Dict[str, Any]], client: OpenAI) -
 async def main() -> None:
     session_id = f"episode_{uuid.uuid4().hex[:8]}"
     
-    # OpenAI Client for LLM calls
-    openai_base_url = API_BASE_URL
-    if not openai_base_url.endswith("/v1") and "huggingface.co" not in openai_base_url:
-        openai_base_url = openai_base_url.rstrip("/") + "/v1"
-    
-    client = OpenAI(base_url=openai_base_url, api_key=HF_TOKEN if HF_TOKEN else "EMPTY")
+    # OpenAI client — uses API_BASE_URL (LLM endpoint) + HF_TOKEN per submission spec
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN if HF_TOKEN else "EMPTY")
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 

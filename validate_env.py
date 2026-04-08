@@ -18,7 +18,8 @@ import json, sys, time, random
 import requests
 import yaml
 
-BASE_URL = "http://localhost:8000"
+import os
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:7860")
 PASS = "[ PASS ]"
 FAIL = "[ FAIL ]"
 results = []
@@ -42,7 +43,7 @@ def run():
         check("Health body has status=ok", body.get("status") == "ok", str(body))
     except Exception as e:
         check("Health endpoint reachable", False, str(e))
-        print("\nCannot reach server. Is it running on port 8000?\n")
+        print("\nCannot reach server. Is it running on port 7860?\n")
         sys.exit(1)
 
     # 2. Reset
