@@ -169,6 +169,9 @@ class CrisisEnvironment:
     def __init__(self, seed: Optional[int] = None):
         self._seed = seed if seed is not None else 42
         self._rng  = random.Random(self._seed)
+        random.seed(self._seed)
+        import numpy as np
+        np.random.seed(self._seed)
 
         self._difficulty          = "medium"
         self._profile             = DIFFICULTY_PROFILES[self._difficulty]
@@ -230,6 +233,9 @@ class CrisisEnvironment:
         if self._seed is None:
             self._seed = 42
         self._rng = random.Random(self._seed)
+        random.seed(self._seed)
+        import numpy as np
+        np.random.seed(self._seed)
 
         self._difficulty          = difficulty if difficulty in DIFFICULTY_PROFILES else "medium"
         self._profile             = DIFFICULTY_PROFILES[self._difficulty]
@@ -412,17 +418,17 @@ class CrisisEnvironment:
 
 
         # FIX 4: Task Completion Boost
-        if d_classify > 0: reward += 0.3
-        if d_predict > 0:  reward += 0.3
-        if d_alloc > 0:    reward += 0.3
+        if d_classify > 0: reward += 0.1
+        if d_predict > 0:  reward += 0.1
+        if d_alloc > 0:    reward += 0.1
 
         # FIX 1: Strong rescue reward shaping
         if action_name == "rescue":
             total_people = max(self._rescue_total_victims, 1)
             improvement = self._rescue_saved / total_people
-            reward += 0.5 * improvement
+            reward += 0.2 * improvement
             if improvement > 0.8:
-                reward += 0.3
+                reward += 0.1
             if d_rescue > 0:
                 reward += 0.2
 
@@ -457,10 +463,10 @@ class CrisisEnvironment:
                 0.15 * current_task_scores["coordination"] +
                 0.25 * current_task_scores["rescue"]
             )
-            reward += final_score * 0.5
+            reward += 0.1 * final_score
 
         # FIX 1: Remove floor and use float np.clip
-        step_reward = float(np.clip(reward, -0.15, 1.0))
+        step_reward = float(np.clip(reward, -0.15, 0.85))
 
         self._cumulative_reward += step_reward
 
@@ -1041,22 +1047,7 @@ class CrisisEnvironment:
         correct_ratio    = correct_count / len(relevant)
         severity_accuracy = (1.0 - _clamp(_mean(severity_errors))) if severity_errors else 0.0
 
-        existing_score = 0.70 * correct_ratio + 0.30 * severity_accuracy
-        
-        # FIX 4: CLASSIFICATION ACTIVATION
-        total_threats = len(self._threats)
-        processed_threats = len(self._classified | self._predicted | self._allocated)
-        
-        if total_threats > 0:
-            coverage_score = processed_threats / total_threats
-        else:
-            coverage_score = 0.0
-            
-        final_score = max(existing_score, 0.6 * coverage_score)
-        
-        # MAGIC MAPPING
-        jitter = self._rng.uniform(0.001, 0.02)
-        final_score = 0.82 + (final_score * 0.12) + (jitter if self._step_count % 2 == 0 else -jitter)
+        final_score = 0.70 * correct_ratio + 0.30 * severity_accuracy
         return round(_clamp(final_score), 4)
 
     def _grader_prediction(self) -> float:
@@ -1082,11 +1073,7 @@ class CrisisEnvironment:
         if not tti_errors:
             return 0.0
 
-        # Give a baseline boost to prediction since it's operating under P(uncertainty)
-        score = 1.0 - 0.3 * _clamp(_mean(tti_errors)) - 0.3 * _clamp(_mean(pop_errors))
-        
-        jitter = self._rng.uniform(0.001, 0.02)
-        score = 0.81 + (score * 0.14) + (jitter if self._step_count % 3 == 0 else -jitter)
+        score = 1.0 - (0.5 * _clamp(_mean(tti_errors)) + 0.5 * _clamp(_mean(pop_errors)))
         return round(_clamp(score), 4)
 
     def _grader_allocation(self) -> float:
@@ -1112,15 +1099,12 @@ class CrisisEnvironment:
         waste_ratio = self._wasted_resource_events / max(self._episode_total_steps, 1)
         waste_penalty = 0.02 * min(self._wasted_resource_events, 8) / 8.0
 
-        # Boost effectiveness mapping for allocation
-        score = 0.55 * effectiveness + 0.25 * zone_affinity + 0.20 * budget_efficiency - waste_penalty
-        
-        # FIX 8: MAKE ALLOCATION HARDER
-        if waste_ratio > 0.3:
-            score *= 0.7
-            
-        jitter = self._rng.uniform(0.001, 0.02)
-        score = 0.83 + (score * 0.12) + (jitter if self._step_count % 2 == 1 else -jitter)
+        score = (
+            0.45 * effectiveness +
+            0.30 * zone_affinity +
+            0.15 * budget_efficiency -
+            waste_penalty
+        )
         return round(_clamp(score), 4)
 
     def _grader_coordination(self) -> float:
@@ -1130,14 +1114,6 @@ class CrisisEnvironment:
         base          = _clamp(_mean(self._coord_scores))
         wrong_penalty = 0.04 * min(self._wrong_priority_events, 6) / 6.0
         score         = base - wrong_penalty
-        
-        # Fix: Base penalty on when coordination *happened*, not the current episode step!
-        avg_coord_step = _mean([float(s) for s in self._coord_steps]) if hasattr(self, "_coord_steps") and self._coord_steps else 5.0
-        time_penalty = 1.0 - (avg_coord_step / max(self._episode_total_steps, 1))
-        score *= max(0.8, time_penalty)
-        
-        jitter = self._rng.uniform(0.002, 0.028)
-        score = 0.80 + (score * 0.15) + (jitter if self._step_count % 4 == 0 else -jitter)
         return round(_clamp(score), 4)
 
     def _grader_rescue(self) -> float:
@@ -1168,9 +1144,6 @@ class CrisisEnvironment:
         score = 0.65 * saved_ratio + 0.20 * speed_score + 0.15 * resource_efficiency
         urgency = 1.0 + (self._step_count / max(self._episode_total_steps, 1))
         score *= min(1.2, urgency)
-        
-        jitter = self._rng.uniform(0.001, 0.025)
-        score = 0.82 + (score * 0.14) + (jitter if self._step_count % 2 == 0 else -jitter)
         return round(_clamp(score), 4)
 
     def _compute_final_score(
@@ -1193,24 +1166,6 @@ class CrisisEnvironment:
             0.15 * co +
             0.25 * r
         )
-
-        budget_efficiency = self._resource_spent / max(self._resource_budget_total, 1)
-        time_efficiency   = 1.0 - (self._step_count / max(self._episode_total_steps, 1))
-
-        final += 0.02 * budget_efficiency
-        final += 0.02 * time_efficiency
-
-        # Milestone bonuses (capped totals prevent final > 1.0 from bonuses alone)
-        if r  > 0.20: final += 0.08
-        elif self._rescue_saved > 0: final += 0.05
-        if self._done: final += 0.06
-        if c  > 0.50: final += 0.04
-        if p  > 0.50: final += 0.04
-        if a  > 0.30: final += 0.03
-        if co > 0.40: final += 0.03
-        if self._resource_spent >= self._resource_budget_total * 0.5:
-            final += 0.03
-
         return round(_clamp(final), 4)
 
     # ─────────────────────────────────────────

@@ -56,8 +56,7 @@ SEED:         int = int(os.environ.get("SEED", "42"))
 USE_LLM:      bool = os.environ.get("USE_LLM", "false").lower() == "true" and _LLM_AVAILABLE
 MAX_RETRIES:  int = 3
 STEP_DELAY:   float = 0.02   # seconds between steps (faster processing)
-MAX_ACTIONS_PER_STEP = 6    # execute up to 6 actions per step (increased to fit coordinate + allocate)
-
+MAX_ACTIONS_PER_STEP = 1    # execute up to 1 action per step
 # ─────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────
@@ -405,13 +404,15 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
 
     # ── Episode loop ───────────────────────────────────────────────────────
     step = 0
+    stagnant_steps = 0
     _live_resource_budget = 99  # initialized; updated after every http_step call
     
-    while not done and step < 50:
+    while not done:
         step += 1
         
-        # Get current active threats
+        # Get current active threats and zones
         active_threats = [t for t in threats if t.get("status") == "active"]
+        active_zones = [z for z in zones if z.get("is_active", False)]
         tracked_threats = list(threats)
         active_ids = {t["threat_id"] for t in active_threats}
         
@@ -422,29 +423,66 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
         unclassified = [t for t in active_threats if t["threat_id"] not in classified]
         unpredicted = [t for t in active_threats if t["threat_id"] not in predicted]
 
+        # ── TERMINATION GUARDS ──────────────────────────────────────────
+        # FIX 1: Max safe steps
+        if step > 35:
+            print("[FORCE STOP] Max safe steps reached")
+            break
+        
+        # FIX 2: No threats + no budget
+        if not active_threats and _live_resource_budget <= 0:
+            print("[EXIT] No threats + no budget")
+            break
+        
+        # FIX 3: Everything resolved
+        if not active_zones and not active_threats:
+            print("[EXIT] Everything resolved")
+            break
+        
+        # SMART TERMINATION: Exit when rescue is sufficient
+        if len(active_zones) <= 1:
+            rescued_so_far = sum(z.get("rescue_units_deployed", 0) for z in zones)
+            if rescued_so_far >= 10:
+                print("[SMART EXIT] Sufficient rescue achieved")
+                break
+        
+        # FIX CHECK: Stagnation guard
+        if len(rewards_list) > 0 and rewards_list[-1] < 0.01:
+            stagnant_steps += 1
+        else:
+            stagnant_steps = 0
+        
+        if stagnant_steps > 5:
+            print("[EXIT] Stagnation detected")
+            break
+
         # ── PHASE DECISION ENGINE ──────────────────────────────────────────
         phase = None
-        if unclassified:
-            phase = "classify"
-        elif unpredicted:
-            phase = "predict"
-        elif not coordinated:
-            phase = "coordinate"
-        elif coordinated and len(tracked_threats) >= 2 and (step - last_coord_step >= 5):
-            # Determine if priorities changed
-            scope = active_threats if len(active_threats) >= 2 else tracked_threats
-            ranked = sorted(scope, key=_priority_score, reverse=True)
-            current_order = [t["threat_id"] for t in ranked]
-            if current_order != last_coord_order:
+
+        if active_threats:
+            high_risk = sorted(active_threats, key=_priority_score, reverse=True)
+
+            # 1. classify only if not done
+            if any(t["threat_id"] not in classified for t in high_risk):
+                phase = "classify"
+
+            # 2. predict only after classify
+            elif any(t["threat_id"] not in predicted for t in high_risk):
+                phase = "predict"
+
+            # 3. coordinate early
+            elif not coordinated:
                 phase = "coordinate"
-            elif len(allocated) < min(len(active_threats), _live_resource_budget):
+
+            # 4. allocate ONLY top threats
+            elif len(allocated) < min(2, len(high_risk)):
                 phase = "allocate"
-            else:
+
+            # 5. rescue aggressively
+            elif _live_resource_budget > 0:
                 phase = "rescue"
-        elif len(allocated) < min(len(active_threats), _live_resource_budget):
-            phase = "allocate"
-        else:
-            phase = "rescue"
+            else:
+                phase = "skip"
 
         # Collect actions to execute this step (max MAX_ACTIONS_PER_STEP)
         actions_to_execute: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
@@ -480,11 +518,11 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
                 phase = "allocate"
 
         if phase == "allocate":
-            ranked_threats = sorted(active_threats, key=_priority_score, reverse=True)
+            top_threats = sorted(active_threats, key=_priority_score, reverse=True)[:2]
             budget_remaining = _live_resource_budget
-            max_allocations = min(len(ranked_threats), _live_resource_budget)
+            max_allocations = min(len(top_threats), _live_resource_budget)
             
-            for threat in ranked_threats:
+            for threat in top_threats:
                 if budget_remaining <= 0:
                     break
                 if len(allocated) + len(actions_to_execute) >= max_allocations:
@@ -501,40 +539,36 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
                                 break
 
         elif phase == "rescue":
-            global current_rescue_target
-            if "current_rescue_target" not in globals():
-                current_rescue_target = None
-
             current_impacted_zones = [z for z in zones if z.get("is_active", False)]
-            
-            # Highest priority zones first
-            MIN_PEOPLE_THRESHOLD = 5
-            active_zones = [
-                z for z in current_impacted_zones
-                if (z.get("total_victims", 0) - z.get("rescued", 0)) >= MIN_PEOPLE_THRESHOLD
-            ]
-            
-            if active_zones:
-                target_zone = max(active_zones, key=lambda z: z.get("total_victims", 0) - z.get("rescued", 0))
-                current_rescue_target = target_zone["zone_id"]
-                
-                people_remaining = target_zone.get("total_victims", 0) - target_zone.get("rescued", 0)
-                _live_budget = _live_resource_budget
-                
-                while _live_budget >= 1 and people_remaining >= MIN_PEOPLE_THRESHOLD:
-                    rescue_act = _rescue_action(target_zone, budget_remaining=_live_budget)
-                    if rescue_act:
-                        actions_to_execute.append(("rescue", target_zone, rescue_act))
-                        units_sent = rescue_act["rescue"]["rescue_units_to_send"]
-                        _live_budget -= units_sent
-                        people_remaining -= (units_sent * 15)
-                    else:
-                        break
+            zones_sorted = sorted(
+                current_impacted_zones,
+                key=lambda z: (z.get("total_victims", 0) - z.get("rescued", 0)),
+                reverse=True
+            )
+
+            if zones_sorted and _live_resource_budget > 0:
+                target = zones_sorted[0]
+                # FINISHING MOVE: send max units to finish quickly
+                rescue_units = min(5, _live_resource_budget)
+                if rescue_units > 0:
+                    action = {
+                        "action_type": "rescue",
+                        "rescue": {
+                            "zone_id": target["zone_id"],
+                            "rescue_units_to_send": rescue_units,
+                        },
+                    }
+                    actions_to_execute.append(("rescue", target, action))
+
+        elif phase == "skip":
+            print("[EXIT] No valid actions remaining")
+            break
 
         # ── Execute collected actions (up to MAX_ACTIONS_PER_STEP) ─────────
         executed = 0
         
-        for action_label, target_obj, action_payload in actions_to_execute[:MAX_ACTIONS_PER_STEP]:
+        if actions_to_execute:
+            action_label, target_obj, action_payload = actions_to_execute[0]
             executed += 1
             
             target_label = (
@@ -607,18 +641,33 @@ def run_episode(seed: int = SEED, difficulty: str = "medium") -> Dict[str, float
 
     # ── Final scores ───────────────────────────────────────────────────────
     state = http_state(session_id)
-    scores = {
+    
+    final_scores = {
         "classification": state.get("classification_score", 0.0),
         "prediction":     state.get("prediction_score", 0.0),
         "allocation":     state.get("allocation_score", 0.0),
         "coordination":   state.get("coordination_score", 0.0),
         "rescue":         state.get("rescue_score", 0.0),
-        "final":          state.get("final_score", 0.0),
     }
 
-    success = scores.get("final", 0.0) >= 0.85
-    log_end(success, _step, scores["final"], rewards_list)
-    return scores
+    final_score = (
+        0.20 * final_scores["classification"] +
+        0.20 * final_scores["prediction"] +
+        0.20 * final_scores["allocation"] +
+        0.15 * final_scores["coordination"] +
+        0.25 * final_scores["rescue"]
+    )
+
+    print("\n[FINAL BREAKDOWN]")
+    print(f"C:  {final_scores['classification']:.3f}")
+    print(f"P:  {final_scores['prediction']:.3f}")
+    print(f"A:  {final_scores['allocation']:.3f}")
+    print(f"Co: {final_scores['coordination']:.3f}")
+    print(f"R:  {final_scores['rescue']:.3f}")
+    print(f"FINAL: {final_score:.3f}")
+
+    log_end(done, step, final_score, rewards_list)
+    return final_scores
 
 
 # ─────────────────────────────────────────────
