@@ -550,8 +550,7 @@ def compute_step_reward(
     decay   = STEP_DECAY_GAMMA ** max(0, step - 1)
     floor   = RESCUE_BASE if action_type == "rescue" else BASE_REWARD
     shaped  = max(floor, shaped * decay)
-    blended = SHAPED_BLEND * shaped + (1.0 - SHAPED_BLEND) * float(env_reward)
-    return max(0.0, blended + timing_penalty)
+    return max(0.0, shaped + timing_penalty)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

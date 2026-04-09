@@ -12,6 +12,13 @@ from server.environment import CrisisEnvironment
 from models import CrisisAction
 
 
+_TASK_DIFF: dict = {
+    "task_easy":   "easy",
+    "task_medium": "medium",
+    "task_hard":   "hard",
+}
+
+
 class CrisisEnvEnvironment(Environment):
     """
     OpenEnv Wrapper for CrisisEnvironment.
@@ -29,15 +36,15 @@ class CrisisEnvEnvironment(Environment):
 
     def reset(self, task_id: str = "task_easy", seed: Optional[int] = None) -> Dict[str, Any]:
         """Reset the environment and return the initial observation as a dict."""
-        obs = self.env.reset(seed=seed)
+        difficulty = _TASK_DIFF.get(str(task_id), "medium")
+        obs = self.env.reset(seed=seed, difficulty=difficulty)
 
         if State:
             self._state = State(
                 episode_id=str(uuid4()),
                 step_count=0,
             )
-        
-        # OpenEnv expects a plain dict for JSON serialization
+
         return obs.model_dump()
 
     def step(self, action_dict: Dict[str, Any]) -> Dict[str, Any]:

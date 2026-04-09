@@ -9,6 +9,7 @@ work both during live episodes and during platform validation.
 
 from typing import Any, Dict, List, Optional
 import random
+from rewards import TASK_WEIGHTS
 
 
 def _get_scores(env: Any) -> Dict[str, float]:
@@ -25,6 +26,20 @@ def _get_scores(env: Any) -> Dict[str, float]:
 # ─────────────────────────────────────────────
 # GRADER FUNCTIONS  (each must return varied scores)
 # ─────────────────────────────────────────────
+
+def _grade_coord_quality(actions: List[Dict]) -> float:
+    """Internal structural scorer for coordinate actions. Used by grade_final."""
+    coord_actions = [a for a in (actions or []) if a.get("action_type") == "coordinate"]
+    if not coord_actions:
+        return 0.001
+    scores_list = []
+    for act in coord_actions:
+        order = act.get("coordination", {}).get("priority_order", [])
+        has_order = bool(order)
+        order_len_ok = 1.0 if len(order) >= 2 else 0.5 if len(order) == 1 else 0.0
+        scores_list.append(0.5 * float(has_order) + 0.5 * order_len_ok)
+    return _safe_score(sum(scores_list) / len(scores_list))
+
 
 def grade_task_easy(env: Any = None, actions: Optional[List[Dict]] = None, **kwargs) -> float:
     """
@@ -50,12 +65,12 @@ def grade_task_easy(env: Any = None, actions: Optional[List[Dict]] = None, **kwa
     scores_list = []
     for act in classify_actions:
         clf = act.get("classification", {})
-        predicted_sev = float(clf.get("predicted_severity", 0.0))
-        # Score based on whether predicted_severity is in a reasonable range
-        if 0.0 <= predicted_sev <= 10.0:
-            scores_list.append(0.6 + 0.4 * (1.0 - abs(predicted_sev - 5.0) / 10.0))
-        else:
-            scores_list.append(0.1)
+        sev = float(clf.get("predicted_severity", -1))
+        has_type = bool(clf.get("predicted_type"))
+        has_id   = clf.get("threat_id") is not None
+        sev_ok   = 1.0 if 0.0 <= sev <= 10.0 else 0.0
+        quality  = 0.5 * float(has_type) + 0.3 * sev_ok + 0.2 * float(has_id)
+        scores_list.append(quality)
 
     raw = sum(scores_list) / len(scores_list)
     return _safe_score(raw)
@@ -83,10 +98,11 @@ def grade_task_medium(env: Any = None, actions: Optional[List[Dict]] = None, **k
         pred = act.get("prediction", {})
         tti = int(pred.get("predicted_tti", 0))
         pop = int(pred.get("predicted_pop", 0))
-        # Reasonable predictions score higher
-        tti_score = 1.0 if 1 <= tti <= 30 else 0.2
-        pop_score = 1.0 if pop > 0 else 0.1
-        scores_list.append((tti_score + pop_score) / 2.0)
+        has_id   = pred.get("threat_id") is not None
+        tti_ok   = 1.0 if 1 <= tti <= 30 else 0.2
+        pop_ok   = 1.0 if pop > 0 else 0.0
+        quality  = 0.3 * float(has_id) + 0.4 * tti_ok + 0.3 * pop_ok
+        scores_list.append(quality)
 
     raw = sum(scores_list) / len(scores_list)
     return _safe_score(raw)
@@ -109,41 +125,49 @@ def grade_task_medium_plus(env: Any = None, actions: Optional[List[Dict]] = None
     if not alloc_actions:
         return 0.001
 
-    # Score: allocations exist and reference valid IDs
-    valid = sum(
-        1 for a in alloc_actions
-        if a.get("allocation", {}).get("threat_id") is not None
-        and a.get("allocation", {}).get("resource_id") is not None
-    )
-    raw = valid / len(alloc_actions)
+    scores_list = []
+    for act in alloc_actions:
+        alloc = act.get("allocation", {})
+        has_threat   = alloc.get("threat_id")   is not None
+        has_resource = alloc.get("resource_id") is not None
+        quality = 0.5 * float(has_threat) + 0.5 * float(has_resource)
+        scores_list.append(quality)
+
+    raw = sum(scores_list) / len(scores_list)
     return _safe_score(raw)
 
 
 def grade_task_hard(env: Any = None, actions: Optional[List[Dict]] = None, **kwargs) -> float:
     """
-    Grade Task 4: Multi-Threat Coordination.
+    Grade Task 3: Full Crisis Response — composite of all 5 task types.
     Returns score in [0.001, 0.999].
     """
     if env is not None:
         scores = _get_scores(env)
-        raw = float(scores.get("coordination", 0.0))
+        raw = (
+            TASK_WEIGHTS["classification"] * float(scores.get("classification", 0.0)) +
+            TASK_WEIGHTS["prediction"]     * float(scores.get("prediction",     0.0)) +
+            TASK_WEIGHTS["allocation"]     * float(scores.get("allocation",     0.0)) +
+            TASK_WEIGHTS["coordination"]   * float(scores.get("coordination",   0.0)) +
+            TASK_WEIGHTS["rescue"]         * float(scores.get("rescue",         0.0))
+        )
         return _safe_score(raw)
 
     if not actions:
         return 0.001
 
-    coord_actions = [a for a in actions if a.get("action_type") == "coordinate"]
-    if not coord_actions:
-        return 0.001
-
-    scores_list = []
-    for act in coord_actions:
-        order = act.get("coordination", {}).get("priority_order", [])
-        # More threats in order = better coordination
-        score = min(1.0, len(order) / 3.0) if order else 0.0
-        scores_list.append(score)
-
-    raw = sum(scores_list) / len(scores_list)
+    c  = grade_task_easy(actions=actions)
+    p  = grade_task_medium(actions=actions)
+    a  = grade_task_medium_plus(actions=actions)
+    co = _grade_coord_quality(actions)
+    r  = grade_task_advanced(actions=actions)
+    raw = (
+        TASK_WEIGHTS["classification"] * c +
+        TASK_WEIGHTS["prediction"]     * p +
+        TASK_WEIGHTS["allocation"]     * a +
+        TASK_WEIGHTS["coordination"]   * co +
+        TASK_WEIGHTS["rescue"]         * r
+    )
     return _safe_score(raw)
 
 
@@ -167,30 +191,38 @@ def grade_task_advanced(env: Any = None, actions: Optional[List[Dict]] = None, *
     scores_list = []
     for act in rescue_actions:
         rsc = act.get("rescue", {})
-        units = int(rsc.get("rescue_units_to_send", 0))
-        score = min(1.0, units / 5.0) if units > 0 else 0.0
-        scores_list.append(score)
+        units    = int(rsc.get("rescue_units_to_send", 0))
+        has_zone = rsc.get("zone_id") is not None
+        units_ok = 1.0 if 1 <= units <= 5 else 0.0
+        quality  = 0.4 * float(has_zone) + 0.6 * units_ok
+        scores_list.append(quality)
 
     raw = sum(scores_list) / len(scores_list)
     return _safe_score(raw)
 
 
 def grade_final(env: Any = None, actions: Optional[List[Dict]] = None, **kwargs) -> float:
-    """Compute final weighted score across all tasks."""
+    """Compute final weighted score across all tasks using canonical TASK_WEIGHTS."""
     if env is not None:
         scores = _get_scores(env)
-        raw = float(scores.get("final_score", scores.get("final", 0.0)))
+        raw = sum(TASK_WEIGHTS[k] * float(scores.get(k, 0.0)) for k in TASK_WEIGHTS)
         return _safe_score(raw)
 
     if not actions:
         return 0.001
 
-    c = grade_task_easy(actions=actions)
-    p = grade_task_medium(actions=actions)
-    a = grade_task_medium_plus(actions=actions)
-    co = grade_task_hard(actions=actions)
-    r = grade_task_advanced(actions=actions)
-    raw = 0.20 * c + 0.20 * p + 0.20 * a + 0.15 * co + 0.25 * r
+    c  = grade_task_easy(actions=actions)
+    p  = grade_task_medium(actions=actions)
+    a  = grade_task_medium_plus(actions=actions)
+    co = _grade_coord_quality(actions)
+    r  = grade_task_advanced(actions=actions)
+    raw = (
+        TASK_WEIGHTS["classification"] * c +
+        TASK_WEIGHTS["prediction"]     * p +
+        TASK_WEIGHTS["allocation"]     * a +
+        TASK_WEIGHTS["coordination"]   * co +
+        TASK_WEIGHTS["rescue"]         * r
+    )
     return _safe_score(raw)
 
 

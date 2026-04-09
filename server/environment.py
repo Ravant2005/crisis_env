@@ -406,15 +406,9 @@ class CrisisEnvironment:
             - 0.25 * waste_frac
         )
 
-        # FIX 2: Skip / Delay Suppression & Progress Check
-        if action_name == "skip":
-            reward *= 0.2
-        elif action_name == "delay":
-            reward *= 0.4
-        
-        # FIX 3: No Progress Penalty
-        if task_progress < 0.01:
-            reward *= 0.3
+        # Single combined no-progress penalty — replaces the two separate blocks
+        if task_progress < 0.005:
+            reward = reward * 0.4 - 0.015
 
 
         # FIX 4: Task Completion Boost
@@ -443,15 +437,25 @@ class CrisisEnvironment:
         if predict_done and allocate_done:
             reward += 0.2
 
-        # 🔥 FIX 7: Force Early Termination (Cleaner Episodes)
-        rescue_done = len(self._affected_zones) > 0 and all(not z.is_active for z in self._affected_zones)
-        total_rescued_ratio = self._rescue_saved / max(self._rescue_total_victims, 1) if self._rescue_total_victims > 0 else 0
-        if rescue_done or self._resource_budget_remaining <= 0 or total_rescued_ratio > 0.85:
+        rescue_done = (
+            len(self._affected_zones) > 0
+            and all(not z.is_active for z in self._affected_zones)
+        )
+        total_rescued_ratio = (
+            self._rescue_saved / max(self._rescue_total_victims, 1)
+            if self._rescue_total_victims > 0 else 0
+        )
+        if rescue_done or total_rescued_ratio > 0.95:
             self._done = True
-
-        # 🔥 FIX 6: No progress penalty (Stricter penalization)
-        if abs(task_progress) < 0.01:
-            reward -= 0.05
+        # budget=0 no longer terminates — agent can still do classify/predict/coordinate
+        
+        # Add this check: if no valid actions remain AND budget is 0, terminate
+        no_valid = (
+            not any(t.status == ThreatStatus.ACTIVE for t in self._threats)
+            and not any(z.is_active for z in self._affected_zones)
+        )
+        if no_valid:
+            self._done = True
 
         # Terminal bonus for completing the episode cleanly
         if self._done:
@@ -1143,8 +1147,7 @@ class CrisisEnvironment:
         resource_efficiency = _clamp(self._rescue_saved / max(1, deployed * 8))
 
         score = 0.70 * saved_ratio + 0.15 * speed_score + 0.15 * resource_efficiency
-        urgency = 1.0 + (self._step_count / max(self._episode_total_steps, 1))
-        return round(_clamp(score * urgency * 1.2), 4)
+        return round(_clamp(score), 4)
 
     def _compute_final_score(
         self,
