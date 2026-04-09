@@ -2,12 +2,13 @@
 Inference Script — CrisisAI: AI Crisis Response & Rescue Coordination
 ======================================================================
 FIXED:
-  - Now runs 3 separate task episodes (task_easy, task_medium, task_hard)
+  - Runs 3 separate task episodes (task_easy, task_medium, task_hard)
   - Each task produces its own [START] / [STEP]* / [END] log sequence
   - Platform validator needs to see at least 3 [END] lines with scores
-  - Grader scores imported from TASK_REGISTRY for final scoring
+  - /reset now sends task_id (not difficulty) matching the server schema
+  - /reset body is always a valid dict (never null)
 
-STDOUT FORMAT (required):
+STDOUT FORMAT (required by platform):
     [START] task=<task_name> env=<benchmark> model=<model_name>
     [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
     [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
@@ -34,18 +35,11 @@ ENV_URL      = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space"
 BENCHMARK    = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
 SEED         = int(os.getenv("SEED", "42"))
 
-MAX_STEPS             = 30
+MAX_STEPS               = 30
 SUCCESS_SCORE_THRESHOLD = 0.3
 
 # The 3 tasks the platform must see scored
 TASK_IDS = ["task_easy", "task_medium", "task_hard"]
-
-# Difficulty mapping per task
-TASK_DIFFICULTY = {
-    "task_easy":   "easy",
-    "task_medium": "medium",
-    "task_hard":   "hard",
-}
 
 # ─────────────────────────────────────────────
 # LOGGING  (exact format required by platform)
@@ -79,28 +73,33 @@ def _headers() -> Dict[str, str]:
         h["Authorization"] = f"Bearer {API_KEY}"
     return h
 
-async def env_reset(session_id: str, difficulty: str = "medium") -> Dict[str, Any]:
+async def env_reset(task_id: str = "task_easy") -> Dict[str, Any]:
+    """POST /reset with task_id and seed. Always sends a valid body."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.post(
         f"{ENV_URL}/reset",
-        json={"seed": SEED, "difficulty": difficulty, "session_id": session_id},
-        headers=_headers(), timeout=30,
+        json={"task_id": task_id, "seed": SEED},
+        headers=_headers(),
+        timeout=30,
     ).json())
 
-async def env_step(action: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+async def env_step(action: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /step with action dict."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.post(
         f"{ENV_URL}/step",
-        json={"action": action, "session_id": session_id},
-        headers=_headers(), timeout=30,
+        json={"action": action},
+        headers=_headers(),
+        timeout=30,
     ).json())
 
-async def env_scores(session_id: str) -> Dict[str, Any]:
+async def env_scores() -> Dict[str, Any]:
+    """GET /scores — returns all 5 task scores + final."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: requests.get(
         f"{ENV_URL}/scores",
-        params={"session_id": session_id},
-        headers=_headers(), timeout=30,
+        headers=_headers(),
+        timeout=30,
     ).json())
 
 # ─────────────────────────────────────────────
@@ -240,9 +239,6 @@ async def run_task(client: OpenAI, task_id: str) -> float:
     Emits [START] ... [STEP]* ... [END] for this task.
     Returns final score in [0.0, 1.0].
     """
-    difficulty  = TASK_DIFFICULTY.get(task_id, "medium")
-    session_id  = f"{task_id}_{uuid.uuid4().hex[:8]}"
-
     rewards:     List[float] = []
     history:     List[str]   = []
     steps_taken: int         = 0
@@ -250,20 +246,22 @@ async def run_task(client: OpenAI, task_id: str) -> float:
     success:     bool        = False
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-    print(f"[INFO] Starting task={task_id} difficulty={difficulty} seed={SEED}", flush=True)
+    print(f"[INFO] Starting task={task_id} seed={SEED}", flush=True)
 
     try:
-        result = await env_reset(session_id, difficulty=difficulty)
-        # Handle both wrapped ({observation: ...}) and flat observation responses
-        obs  = result.get("observation", result)
+        # Reset — always send a valid body with task_id
+        reset_result = await env_reset(task_id=task_id)
+
+        # Handle both flat obs and wrapped {"observation": ...} response
+        obs  = reset_result.get("observation", reset_result)
         done = bool(obs.get("done", False))
 
         for step in range(1, MAX_STEPS + 1):
             if done:
                 break
 
-            action    = get_llm_action(client, obs, step, history, task_id)
-            step_result = await env_step(action, session_id)
+            action      = get_llm_action(client, obs, step, history, task_id)
+            step_result = await env_step(action)
 
             reward  = float(step_result.get("reward", 0.0))
             done    = bool(step_result.get("done", False))
@@ -280,7 +278,7 @@ async def run_task(client: OpenAI, task_id: str) -> float:
             # Fetch score periodically and at end
             if done or step % 5 == 0:
                 try:
-                    scores_resp = await env_scores(session_id)
+                    scores_resp = await env_scores()
                     s = float(
                         scores_resp.get("final_score")
                         or scores_resp.get("final")
@@ -296,7 +294,7 @@ async def run_task(client: OpenAI, task_id: str) -> float:
 
         # Final score fetch
         try:
-            scores_resp = await env_scores(session_id)
+            scores_resp = await env_scores()
             final = float(
                 scores_resp.get("final_score")
                 or scores_resp.get("final")
@@ -316,7 +314,6 @@ async def run_task(client: OpenAI, task_id: str) -> float:
             pass
 
         score   = min(max(score, 0.0), 1.0)
-        # Never report exactly 0.0 if steps were taken
         if score == 0.0 and steps_taken > 0:
             score = 0.001
         success = score >= SUCCESS_SCORE_THRESHOLD
@@ -349,19 +346,15 @@ async def main() -> None:
     scores: Dict[str, float] = {}
     start  = time.time()
 
-    # ── Run each task sequentially ────────────────────────────────────────
-    # The platform validator needs one [START]...[END] block per task.
     for task_id in TASK_IDS:
         t0 = time.time()
         scores[task_id] = await run_task(client, task_id)
         elapsed = time.time() - t0
         print(f"[INFO] Task '{task_id}' done in {elapsed:.1f}s  score={scores[task_id]:.3f}", flush=True)
-        # Small pause between tasks to avoid rate limiting
         await asyncio.sleep(1.0)
 
     total = time.time() - start
 
-    # ── Summary ───────────────────────────────────────────────────────────
     print(f"\n{'=' * 60}", flush=True)
     print("  FINAL RESULTS", flush=True)
     print(f"{'=' * 60}", flush=True)
@@ -376,7 +369,6 @@ async def main() -> None:
     print(f"{'=' * 60}", flush=True)
     print(f"  Total time: {total:.1f}s", flush=True)
 
-    # ── SCORE line (parseable by stress_test.py) ──────────────────────────
     parts = " | ".join(f"{k}={v:.4f}" for k, v in scores.items())
     print(f"[SCORE] {parts} | final={avg:.4f}", flush=True)
 
