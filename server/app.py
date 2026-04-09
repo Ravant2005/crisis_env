@@ -160,9 +160,29 @@ def state() -> Dict[str, Any]:
 
 
 @app.get("/scores", tags=["OpenEnv"])
-def scores() -> Dict[str, float]:
-    """Return current task scores."""
-    return env.task_scores()
+def get_scores():
+    """
+    Returns all task scores + final score.
+    Required for OpenEnv validation + inference script.
+    """
+    scores = env.task_scores()
+
+    final_score = (
+        0.20 * scores.get("classification", 0.0) +
+        0.20 * scores.get("prediction", 0.0) +
+        0.20 * scores.get("allocation", 0.0) +
+        0.15 * scores.get("coordination", 0.0) +
+        0.25 * scores.get("rescue", 0.0)
+    )
+
+    return {
+        "classification": round(scores.get("classification", 0.0), 4),
+        "prediction": round(scores.get("prediction", 0.0), 4),
+        "allocation": round(scores.get("allocation", 0.0), 4),
+        "coordination": round(scores.get("coordination", 0.0), 4),
+        "rescue": round(scores.get("rescue", 0.0), 4),
+        "final_score": round(final_score, 4)
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
