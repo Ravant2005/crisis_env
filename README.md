@@ -17,13 +17,13 @@ pinned: false
 
 Modern conflicts and disasters demand simultaneous, time-critical decisions across threat identification, casualty projection, resource deployment, inter-agency coordination, and survivor rescue — all under uncertainty and resource constraints. No existing RL benchmark captures this full pipeline in a single environment.
 
-**CrisisAI** models a concrete, high-stakes scenario: three simultaneous attacks on India —
+**CrisisAI** models a concrete, high-stakes scenario: multi-region crisis simulation —
 
-| Attack | Vector | Location | Unmitigated Casualties |
+| Threat | Vector | Location | Unmitigated Casualties |
 |--------|--------|----------|----------------------|
-| ✈️ Airstrike | Fighter jet | Military Base Alpha | ~50 |
-| 🚢 Naval Force | Ship attack | Naval Port Sector 7 | ~300 |
-| 🎯 Drone Strike | UAV swarm | Downtown Mall / Business District | ~1,500 |
+| ✈️ Airstrike | Fighter jet | Military Zone Alpha | ~50 |
+| 🚢 Naval Force | Ship attack | Maritime Sector 7 | ~300 |
+| 🎯 Drone Strike | UAV swarm | Urban District / Business Zone | ~1,500 |
 
 An agent must classify each threat, predict its impact, allocate the right defense resources, coordinate response priority across all three simultaneously, and rescue survivors if attacks land — under a shared resource budget and ticking TTI (time-to-impact) clock.
 
