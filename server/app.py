@@ -138,14 +138,36 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
 def step(req: StepRequest) -> StepResult:
     """Submit one action. Returns observation, reward, done, info."""
-    result = env.step(req.action)
-
-    return {
-        "observation": result["observation"],
-        "reward": float(result["reward"]),
-        "done": bool(result["done"]),
-        "info": result.get("info", {})
-    }
+    try:
+        result = env.step(req.action)
+        return {
+            "observation": result["observation"],
+            "reward": float(result["reward"]),
+            "done": bool(result["done"]),
+            "info": result.get("info", {})
+        }
+    except Exception as e:
+        # Log the error (visible in server console) but return a valid StepResult
+        import traceback
+        traceback.print_exc()
+        return {
+            "observation": {
+                "threats": [],
+                "resources": [],
+                "affected_zones": [],
+                "time_remaining": 0,
+                "current_step": 0,
+                "alerts": [f"Internal error: {str(e)}"],
+                "episode_id": "error",
+                "resource_budget_remaining": 0,
+                "resource_budget_total": 0,
+                "recent_actions": [],
+                "valid_actions": {"action_mask": [0]*7}
+            },
+            "reward": 0.0,
+            "done": True,
+            "info": {"error": str(e)}
+        }
 
 
 @app.get("/state", tags=["OpenEnv"])
