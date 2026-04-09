@@ -132,14 +132,22 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
     if task_id is None:
         task_id = "task_easy"
 
-    return env.reset(task_id=task_id, seed=seed)
+    result = env.reset(task_id=task_id, seed=seed)
+
+    return result
 
 
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
 def step(req: StepRequest) -> StepResult:
     """Submit one action. Returns observation, reward, done, info."""
     result = env.step(req.action)
-    return result
+
+    return {
+        "observation": result["observation"],
+        "reward": result["reward"],
+        "done": result["done"],
+        "info": result["info"],
+    }
 
 
 @app.get("/state", tags=["OpenEnv"])
