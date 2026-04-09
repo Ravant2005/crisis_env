@@ -134,7 +134,10 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
 
     result = env.reset(task_id=task_id, seed=seed)
 
-    return result
+    return {
+        "observation": result["observation"],
+        "info": result.get("info", {})
+    }
 
 
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
