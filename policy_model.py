@@ -73,7 +73,7 @@ class PolicyNetwork(nn.Module):
     def __init__(
         self,
         state_dim: int = STATE_DIM,
-        hidden_dim: int = 512,
+        hidden_dim: int = 256,
         dropout: float = 0.08,
     ) -> None:
         super().__init__()
