@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from server.crisis_env_environment import CrisisEnvEnvironment
@@ -111,31 +111,18 @@ def tasks() -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 @app.post("/reset", tags=["OpenEnv"])
-def reset(req: Optional[ResetRequest] = None) -> Dict[str, Any]:
+def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
     """
-    Reset the environment.
-
-    Accepts:
-      - No body at all (platform validator sends null)
-      - {"task_id": "task_easy"}
-      - {"difficulty": "easy"}
-      - {"seed": 42}
-      - Any combination of the above
-
-    Returns the flat CrisisObservation dict.
+    Reset the environment and return the initial observation as a flat dict.
+    Supports empty/null body for OpenEnv platform compliance.
     """
-    # Resolve task_id with fallback chain:
-    #   1. explicit task_id field
-    #   2. difficulty field mapped to task_id
-    #   3. default to "task_easy"
-    task_id    = None
-    seed       = None
-    difficulty = None
+    # If req is None (null body), create a default request
+    if req is None:
+        req = ResetRequest()
 
-    if req is not None:
-        task_id    = req.task_id
-        seed       = req.seed
-        difficulty = req.difficulty
+    task_id    = req.task_id
+    seed       = req.seed
+    difficulty = req.difficulty
 
     # If caller sent difficulty but not task_id, derive task_id
     if task_id is None and difficulty is not None:
