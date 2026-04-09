@@ -148,25 +148,6 @@ def state() -> Dict[str, Any]:
     return env.get_full_state()
 
 
-@app.get("/scores", tags=["OpenEnv"])
-def scores() -> Dict[str, Any]:
-    """
-    Return grader score summary.
-    Required by inference.py (/scores endpoint) and platform validator (check 5).
-    Exposes both 'final_score' and 'final' keys for compatibility.
-    """
-    full = env.get_full_state()
-    return {
-        "classification": full.get("classification_score", 0.0),
-        "prediction":     full.get("prediction_score",     0.0),
-        "allocation":     full.get("allocation_score",     0.0),
-        "coordination":   full.get("coordination_score",   0.0),
-        "rescue":         full.get("rescue_score",         0.0),
-        "final_score":    full.get("final_score",          0.0),
-        "final":          full.get("final_score",          0.0),
-    }
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT (mandatory for platform validator)
 # ──────────────────────────────────────────────────────────────────────────────
