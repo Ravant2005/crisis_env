@@ -159,6 +159,12 @@ def state() -> Dict[str, Any]:
     return env.get_full_state()
 
 
+@app.get("/scores", tags=["OpenEnv"])
+def scores() -> Dict[str, float]:
+    """Return current task scores."""
+    return env.task_scores()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT (mandatory for platform validator)
 # ──────────────────────────────────────────────────────────────────────────────
