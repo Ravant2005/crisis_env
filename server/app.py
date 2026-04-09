@@ -141,16 +141,11 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
 
 
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
-def step(req: StepRequest) -> StepResult:
+def step(req: StepRequest) -> Dict[str, Any]:
     """Submit one action. Returns observation, reward, done, info."""
     result = env.step(req.action)
 
-    return {
-        "observation": result["observation"],
-        "reward": result["reward"],
-        "done": result["done"],
-        "info": result["info"],
-    }
+    return result
 
 
 @app.get("/state", tags=["OpenEnv"])
