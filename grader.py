@@ -69,7 +69,13 @@ def grade_task_easy(env: Any = None, actions: Optional[List[Dict]] = None, **kwa
         has_type = bool(clf.get("predicted_type"))
         has_id   = clf.get("threat_id") is not None
         sev_ok   = 1.0 if 0.0 <= sev <= 10.0 else 0.0
-        quality  = 0.5 * float(has_type) + 0.3 * sev_ok + 0.2 * float(has_id)
+
+        if sev_ok:
+            consistency = 1.0 if abs(sev - 5.0) < 5 else 0.5
+        else:
+            consistency = 0.0
+
+        quality  = 0.4 * float(has_type) + 0.3 * sev_ok + 0.3 * consistency
         scores_list.append(quality)
 
     raw = sum(scores_list) / len(scores_list)
@@ -140,17 +146,23 @@ def grade_task_medium_plus(env: Any = None, actions: Optional[List[Dict]] = None
 def grade_task_hard(env: Any = None, actions: Optional[List[Dict]] = None, **kwargs) -> float:
     """
     Grade Task 3: Full Crisis Response — composite of all 5 task types.
+    Emphasizes coordination + rescue (true difficulty).
     Returns score in [0.001, 0.999].
     """
     if env is not None:
         scores = _get_scores(env)
+
         raw = (
-            TASK_WEIGHTS["classification"] * float(scores.get("classification", 0.0)) +
-            TASK_WEIGHTS["prediction"]     * float(scores.get("prediction",     0.0)) +
-            TASK_WEIGHTS["allocation"]     * float(scores.get("allocation",     0.0)) +
-            TASK_WEIGHTS["coordination"]   * float(scores.get("coordination",   0.0)) +
-            TASK_WEIGHTS["rescue"]         * float(scores.get("rescue",         0.0))
+            0.10 * float(scores.get("classification", 0.0)) +
+            0.15 * float(scores.get("prediction", 0.0)) +
+            0.20 * float(scores.get("allocation", 0.0)) +
+            0.25 * float(scores.get("coordination", 0.0)) +
+            0.30 * float(scores.get("rescue", 0.0))
         )
+
+        imbalance = abs(scores.get("rescue", 0) - scores.get("allocation", 0))
+        raw -= 0.1 * imbalance
+
         return _safe_score(raw)
 
     if not actions:
@@ -162,11 +174,11 @@ def grade_task_hard(env: Any = None, actions: Optional[List[Dict]] = None, **kwa
     co = _grade_coord_quality(actions)
     r  = grade_task_advanced(actions=actions)
     raw = (
-        TASK_WEIGHTS["classification"] * c +
-        TASK_WEIGHTS["prediction"]     * p +
-        TASK_WEIGHTS["allocation"]     * a +
-        TASK_WEIGHTS["coordination"]   * co +
-        TASK_WEIGHTS["rescue"]         * r
+        0.10 * c +
+        0.15 * p +
+        0.20 * a +
+        0.25 * co +
+        0.30 * r
     )
     return _safe_score(raw)
 
