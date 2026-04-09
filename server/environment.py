@@ -751,7 +751,7 @@ class CrisisEnvironment:
                 t.priority_rank = rank + 1
 
         wrong_priority_penalty = 0.0
-        if ideal and order[0] != ideal[0]:
+        if ideal and order and order[0] != ideal[0]:
             wrong_priority_penalty = 0.015
             self._wrong_priority_events += 1
 
@@ -1355,7 +1355,8 @@ class CrisisEnvironment:
             + channel            * 389
         )
         # Using a fresh RandomState for stable, per-symbol noise
-        return float(np.random.RandomState(mix % (2**32)).normal(0.0, scale))
+        seed_val = abs(mix) % (2**32)
+        return float(np.random.RandomState(seed_val).normal(0.0, scale))
 
     def _record_action_memory(self, action: CrisisAction) -> None:
         name = action.action_type.value if hasattr(action.action_type, "value") else str(action.action_type)
