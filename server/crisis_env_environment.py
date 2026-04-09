@@ -45,7 +45,10 @@ class CrisisEnvEnvironment(Environment):
                 step_count=0,
             )
 
-        return obs.model_dump()
+        return {
+            "observation": obs.model_dump(),
+            "info": {}
+        }
 
     def step(self, action_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Execute one step in the environment using a raw action dictionary."""
