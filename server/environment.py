@@ -397,45 +397,19 @@ class CrisisEnvironment:
         waste_frac = _clamp(self._wasted_resource_events / max(self._episode_total_steps, 1))
 
         # Base Reward Component
-        reward = (
-            2.5 * task_progress
-            + handler_bonus
-            + 0.15 * budget_eff
-            - 0.20 * time_fraction
-            - 0.35 * invalid_action_penalty
-            - 0.25 * waste_frac
+        # Priority 2: Simplified interpreted reward function
+        task_progress_weighted = (
+            0.20 * d_classify + 0.20 * d_predict +
+            0.20 * d_alloc   + 0.15 * d_coord   + 0.25 * d_rescue
         )
+        handler_signal = max(0.0, float(action_bonus))
+        time_cost      = 0.01 * (self._step_count / max(self._episode_total_steps, 1))
 
-        # Single combined no-progress penalty — replaces the two separate blocks
-        if task_progress < 0.005:
-            reward = reward * 0.4 - 0.015
-
-
-        # FIX 4: Task Completion Boost
-        if d_classify > 0: reward += 0.1
-        if d_predict > 0:  reward += 0.1
-        if d_alloc > 0:    reward += 0.1
-
-        # FIX 1: Strong rescue reward shaping
-        if action_name == "rescue":
-            total_people = max(self._rescue_total_victims, 1)
-            improvement = self._rescue_saved / total_people
-            reward += 0.2 * improvement
-            if improvement > 0.8:
-                reward += 0.1
-            if d_rescue > 0:
-                reward += 0.2
-
-        # FIX 5: Pipeline Bonus
-        # Intelligent decision pipeline: classify -> predict -> allocate
-        classify_done = len(self._classified) >= len(self._threats) and len(self._threats) > 0
-        predict_done  = len(self._predicted) >= len(self._threats) and len(self._threats) > 0
-        allocate_done = len(self._allocated) >= len(self._threats) and len(self._threats) > 0
-        
-        if classify_done and predict_done:
-            reward += 0.2
-        if predict_done and allocate_done:
-            reward += 0.2
+        reward = 3.0 * task_progress_weighted + handler_signal - time_cost
+        if action_name in ("skip", "delay"):
+            reward = min(reward, -0.05)
+        if task_progress_weighted < 0.005:
+            reward -= 0.02
 
         rescue_done = (
             len(self._affected_zones) > 0
@@ -457,6 +431,8 @@ class CrisisEnvironment:
         if no_valid:
             self._done = True
 
+        step_reward = float(np.clip(reward, -0.20, 1.0))
+
         # Terminal bonus for completing the episode cleanly
         if self._done:
             # FIX 2: Terminal bonus
@@ -468,9 +444,6 @@ class CrisisEnvironment:
                 0.25 * current_task_scores["rescue"]
             )
             reward += 0.1 * final_score
-
-        # FIX 1: Remove floor and use float np.clip
-        step_reward = float(np.clip(reward, -0.15, 0.85))
 
         self._cumulative_reward += step_reward
 
