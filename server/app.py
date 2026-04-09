@@ -78,13 +78,12 @@ def tasks() -> Dict[str, Any]:
 # 🔹 OPENENV endpoints
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.post("/reset", tags=["OpenEnv"], response_model=Observation)
-def reset(req: ResetRequest):
-    result = env.reset(
+@app.post("/reset", tags=["OpenEnv"])
+def reset(req: ResetRequest) -> Dict[str, Any]:
+    return env.reset(
         task_id=req.task_id,
         seed=req.seed
     )
-    return {"state": result}
 
 
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
@@ -93,10 +92,24 @@ def step(req: StepRequest):
     return result
 
 
-@app.get("/state", tags=["OpenEnv"], response_model=Observation)
-def state():
-    result = env.get_full_state()
-    return {"state": result}
+@app.get("/state", tags=["OpenEnv"])
+def state() -> Dict[str, Any]:
+    return env.get_full_state()
+
+
+@app.get("/scores", tags=["OpenEnv"])
+def scores() -> Dict[str, Any]:
+    """Return grader score summary — required by inference.py and platform validator."""
+    full = env.get_full_state()
+    return {
+        "classification": full.get("classification_score", 0.0),
+        "prediction":     full.get("prediction_score",     0.0),
+        "allocation":     full.get("allocation_score",     0.0),
+        "coordination":   full.get("coordination_score",   0.0),
+        "rescue":         full.get("rescue_score",         0.0),
+        "final_score":    full.get("final_score",          0.0),
+        "final":          full.get("final_score",          0.0),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────

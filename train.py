@@ -900,13 +900,15 @@ def rollout_single_episode(
 
         # ── Execute forced or policy action ───────────────────────────────
         if forced_action is not None:
-            result = env.step(CrisisAction(**forced_action))
-            n_actions = len(ACTION_TYPES)
-            log_prob  = torch.tensor(-float(np.log(n_actions)), dtype=torch.float32, device=device)
-            entropy   = torch.tensor(float(np.log(n_actions)), dtype=torch.float32, device=device)
             at = forced_action["action_type"]
             action_idx = ACTION_TYPES.index(at) if at in ACTION_TYPES else 5
+            # Use actual policy distribution for log_prob — `out` is already computed above
+            _dist    = torch.distributions.Categorical(logits=out["action_type"].squeeze(0))
+            _act_t   = torch.tensor(action_idx, dtype=torch.long, device=device)
+            log_prob = _dist.log_prob(_act_t)
+            entropy  = _dist.entropy()
             action_dict = forced_action
+            result = env.step(CrisisAction(**forced_action))
 
             # Update coordination state
             if at == "coordinate":

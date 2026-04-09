@@ -352,28 +352,69 @@ class PolicyNetwork(nn.Module):
         flat_logits = {k: v.squeeze(0) for k, v in logits.items()}
 
         if greedy:
-            from utils import choose_baseline_action
-            import random
-            
-            classified = getattr(self, "eval_classified", set())
-            predicted  = getattr(self, "eval_predicted", set())
-            last_coord = getattr(self, "eval_last_coord", -10)
-            
-            # Reset state for a new episode
-            step = int(obs_dict.get("current_step", 0))
-            if step <= 1:
-                classified.clear()
-                predicted.clear()
-                last_coord = -10
-                
-            action_dict, last_coord = choose_baseline_action(
-                obs_dict, random.Random(), classified, predicted, last_coord
+            # Use trained network logits through the full decode pipeline
+            strategy_idx = int(torch.argmax(flat_logits["strategy"]).item())
+
+            action_mask_t = torch.tensor(mask["action_mask"], dtype=torch.float32, device=device)
+            masked_at     = self._masked_logits(flat_logits["action_type"], action_mask_t)
+            action_idx    = int(torch.argmax(masked_at).item())
+            action_name   = ACTION_TYPES[action_idx]
+
+            threat_idx   = 0
+            resource_idx = 0
+            zone_idx     = 0
+            units_idx    = 0
+            severity_idx = 5
+            tti_idx      = 10
+            pop_idx      = 10
+
+            if action_name in {"classify", "predict", "allocate", "delay"}:
+                thr_mask = torch.tensor(mask["threat_mask"], dtype=torch.float32, device=device)
+                threat_idx = int(torch.argmax(
+                    self._masked_logits(flat_logits["threat"], thr_mask)
+                ).item())
+
+            if action_name == "allocate":
+                res_mask = torch.tensor(mask["resource_mask"], dtype=torch.float32, device=device)
+                resource_idx = int(torch.argmax(
+                    self._masked_logits(flat_logits["resource"], res_mask)
+                ).item())
+
+            if action_name == "rescue":
+                zon_mask = torch.tensor(mask["zone_mask"], dtype=torch.float32, device=device)
+                zone_idx = int(torch.argmax(
+                    self._masked_logits(flat_logits["zone"], zon_mask)
+                ).item())
+                uni_mask = torch.tensor(mask["units_mask"], dtype=torch.float32, device=device)
+                units_idx = int(torch.argmax(
+                    self._masked_logits(flat_logits["units"], uni_mask)
+                ).item())
+
+            if action_name == "classify":
+                severity_idx = int(torch.argmax(flat_logits["severity"]).item())
+
+            if action_name == "predict":
+                tti_idx = int(torch.argmax(flat_logits["tti"]).item())
+                pop_idx = int(torch.argmax(flat_logits["pop"]).item())
+
+            if action_name == "delay":
+                del_mask = torch.tensor([1.0] * MAX_RESCUE_UNITS, dtype=torch.float32, device=device)
+                units_idx = int(torch.argmax(
+                    self._masked_logits(flat_logits["units"], del_mask)
+                ).item())
+
+            action_dict = decode_action(
+                obs_dict        = obs_dict,
+                strategy_idx    = strategy_idx,
+                action_type_idx = action_idx,
+                threat_idx      = threat_idx,
+                resource_idx    = resource_idx,
+                zone_idx        = zone_idx,
+                units_idx       = units_idx,
+                severity_idx    = severity_idx,
+                tti_idx         = tti_idx,
+                pop_idx         = pop_idx,
             )
-            
-            self.eval_classified = classified
-            self.eval_predicted = predicted
-            self.eval_last_coord = last_coord
-            
             zero = torch.tensor(0.0, device=device)
             return action_dict, zero, zero, logits
 
