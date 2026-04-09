@@ -20,7 +20,6 @@ BUG FIXES applied in this version:
 
 from __future__ import annotations
 
-import random
 import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -168,7 +167,6 @@ class CrisisEnvironment:
 
     def __init__(self, seed: Optional[int] = None):
         self._seed = seed if seed is not None else 42
-        self._rng  = random.Random(self._seed)
         self._np_rng = np.random.RandomState(self._seed)
 
         self._difficulty          = "medium"
@@ -232,7 +230,6 @@ class CrisisEnvironment:
             self._seed = seed
         if self._seed is None:
             self._seed = 42
-        self._rng = random.Random(self._seed)
         self._np_rng = np.random.RandomState(self._seed)
 
         self._difficulty          = difficulty if difficulty in DIFFICULTY_PROFILES else "medium"
@@ -679,13 +676,13 @@ class CrisisEnvironment:
         self._spend_budget(1)
         resource.is_available = False
         resource.assigned_to  = threat.threat_id
-        resource.cooldown_steps = self._rng.randint(1, 3)
+        resource.cooldown_steps = self._np_rng.randint(1, 4)
         threat.assigned_resource = resource.resource_id
 
         affinity     = ZONE_RESOURCE_AFFINITY.get(threat.zone, [])
         match_bonus  = 0.18 if resource.resource_type in affinity else -0.08
 
-        effectiveness_noise = self._rng.uniform(-0.12, 0.12)
+        effectiveness_noise = self._np_rng.uniform(-0.12, 0.12)
         effective_power = _clamp(resource.effectiveness + match_bonus + effectiveness_noise)
         self._threat_mitigation[threat.threat_id] = _clamp(
             self._threat_mitigation.get(threat.threat_id, 0.0) + effective_power * 0.55,
@@ -792,7 +789,7 @@ class CrisisEnvironment:
         }.get(zone.zone_type, 1.0)
 
         rescue_effectiveness = _clamp(
-            self._rng.uniform(0.76, 1.08) - self._profile.obs_noise * 0.2, 0.45, 1.15
+            self._np_rng.uniform(0.76, 1.08) - self._profile.obs_noise * 0.2, 0.45, 1.15
         )
         saved = min(remaining, int(spendable * 14 * zone_multiplier * rescue_effectiveness))
         zone.rescued       += saved
@@ -844,7 +841,7 @@ class CrisisEnvironment:
             0.2, 0.85,
         )
 
-        if self._rng.random() < success_prob:
+        if self._np_rng.random_sample() < success_prob:
             self._delay_buffer[threat.threat_id] = min(
                 3, self._delay_buffer.get(threat.threat_id, 0) + requested
             )
@@ -852,8 +849,8 @@ class CrisisEnvironment:
             return bonus, [f"[DELAY] Threat {threat.threat_id} delayed by {requested} step(s)."], {}
 
         truth = self._true_state[threat.threat_id]
-        truth["severity"] = min(10.0, truth["severity"] + self._rng.uniform(0.1, 0.5))
-        truth["population"] *= self._rng.uniform(1.01, 1.06)
+        truth["severity"] = min(10.0, truth["severity"] + self._np_rng.uniform(0.1, 0.5))
+        truth["population"] *= self._np_rng.uniform(1.01, 1.06)
         return -0.01, [f"[DELAY] Threat {threat.threat_id} delay failed; escalation observed."], {
             "wrong_priority_penalty": 0.008
         }
@@ -872,7 +869,7 @@ class CrisisEnvironment:
         self._spend_budget(units)
 
         truth = self._true_state[threat.threat_id]
-        moved = int(min(truth["population"], units * 20 * self._rng.uniform(0.7, 1.1)))
+        moved = int(min(truth["population"], units * 20 * self._np_rng.uniform(0.7, 1.1)))
         truth["population"] = max(0.0, truth["population"] - moved)
         threat.population_evacuated += moved
 
@@ -906,15 +903,15 @@ class CrisisEnvironment:
             mitigation = self._threat_mitigation.get(tid, 0.0)
 
             escalation_prob = _clamp(self._profile.escalation_prob * (1.1 - mitigation), 0.02, 0.45)
-            if self._rng.random() < escalation_prob:
-                truth["severity"]   = min(10.0, truth["severity"] + self._rng.uniform(0.2, 0.8))
-                truth["population"] *= self._rng.uniform(1.03, 1.10)
+            if self._np_rng.random_sample() < escalation_prob:
+                truth["severity"]   = min(10.0, truth["severity"] + self._np_rng.uniform(0.2, 0.8))
+                truth["population"] *= self._np_rng.uniform(1.03, 1.10)
                 alerts.append(f"[ESCALATION] Threat {tid} intensified.")
 
             if (
                 len(self._threats) < MAX_THREATS_VISIBLE
                 and truth["severity"] >= 7.0
-                and self._rng.random() < self._profile.spread_prob * (1.0 - mitigation)
+                and self._np_rng.random_sample() < self._profile.spread_prob * (1.0 - mitigation)
             ):
                 new = self._spawn_secondary_threat(parent=threat)
                 alerts.append(f"[SPREAD] Secondary threat {new.threat_id} emerged near {threat.location_name}.")
@@ -926,7 +923,7 @@ class CrisisEnvironment:
 
             self._threat_mitigation[tid] = _clamp(mitigation * 0.92, 0.0, 0.95)
 
-            if truth["tti"] > 0 and self._threat_mitigation[tid] > 0.72 and self._rng.random() < 0.35:
+            if truth["tti"] > 0 and self._threat_mitigation[tid] > 0.72 and self._np_rng.random_sample() < 0.35:
                 threat.status = ThreatStatus.CONTAINED
                 prevented = int(truth["population"] * 0.55)
                 self._casualties_prevented += prevented
@@ -992,7 +989,7 @@ class CrisisEnvironment:
         total_mitigation        = _clamp(mitigation + prediction_support + classification_support, 0.0, 0.92)
 
         base_rate    = _clamp(0.08 + severity * 0.72, 0.05, 0.95)
-        chaos_factor = self._rng.uniform(0.85, 1.15)
+        chaos_factor = self._np_rng.uniform(0.85, 1.15)
         casualty_rate = _clamp(base_rate * chaos_factor * (1.0 - total_mitigation), 0.01, 0.98)
 
         casualties = int(population * casualty_rate)
@@ -1279,13 +1276,16 @@ class CrisisEnvironment:
         return 0.0
 
     def _generate_threats(self, threat_count: int) -> List[ThreatInfo]:
-        chosen   = self._rng.sample(THREAT_TEMPLATES, k=threat_count)
+        # Using np_rng.choice to replace random.sample
+        indices = self._np_rng.choice(len(THREAT_TEMPLATES), size=threat_count, replace=False)
+        chosen = [THREAT_TEMPLATES[i] for i in indices]
+        
         threats: List[ThreatInfo] = []
         for i, (threat_type, zone, location, base_pop) in enumerate(chosen, start=1):
-            severity  = round(self._rng.uniform(4.0, 9.6), 2)
-            pop_jitter = self._rng.randint(-int(base_pop * 0.22), int(base_pop * 0.22))
+            severity  = round(self._np_rng.uniform(4.0, 9.6), 2)
+            pop_jitter = self._np_rng.randint(-int(base_pop * 0.22), int(base_pop * 0.22) + 1)
             population = max(15, base_pop + pop_jitter)
-            tti        = self._rng.randint(4, 16)
+            tti        = self._np_rng.randint(4, 17)
             threats.append(ThreatInfo(
                 threat_id        = i,
                 threat_type      = threat_type,
@@ -1301,7 +1301,7 @@ class CrisisEnvironment:
     def _generate_resources(self) -> List[ResourceInfo]:
         resources: List[ResourceInfo] = []
         for i, (rtype, zone, base_eff) in enumerate(RESOURCE_TEMPLATES, start=1):
-            jitter = self._rng.uniform(-0.06, 0.06)
+            jitter = self._np_rng.uniform(-0.06, 0.06)
             resources.append(ResourceInfo(
                 resource_id    = i,
                 resource_type  = rtype,
@@ -1311,18 +1311,18 @@ class CrisisEnvironment:
                 cooldown_steps = 0,
                 # BUG FIX 6: distance attribute populated so train.py reward_kwargs builder
                 # doesn't crash on missing field.
-                distance       = round(self._rng.uniform(1.0, 50.0), 1),
+                distance       = round(self._np_rng.uniform(1.0, 50.0), 1),
             ))
         return resources
 
     def _spawn_secondary_threat(self, parent: ThreatInfo) -> ThreatInfo:
         next_id      = max(t.threat_id for t in self._threats) + 1
-        cascade_type = self._rng.choice([ThreatType.FIRE, ThreatType.EXPLOSION, ThreatType.DRONE_THREAT])
+        cascade_type = self._np_rng.choice([ThreatType.FIRE, ThreatType.EXPLOSION, ThreatType.DRONE_THREAT])
 
         parent_truth = self._true_state[parent.threat_id]
-        severity     = round(_clamp(parent_truth["severity"] * self._rng.uniform(0.48, 0.72), 2.5, 8.8), 2)
-        population   = max(20, int(parent_truth["population"] * self._rng.uniform(0.25, 0.45)))
-        tti          = self._rng.randint(3, 9)
+        severity     = round(_clamp(parent_truth["severity"] * self._np_rng.uniform(0.48, 0.72), 2.5, 8.8), 2)
+        population   = max(20, int(parent_truth["population"] * self._np_rng.uniform(0.25, 0.45)))
+        tti          = self._np_rng.randint(3, 10)
 
         new = ThreatInfo(
             threat_id         = next_id,
@@ -1354,7 +1354,8 @@ class CrisisEnvironment:
             + threat_id          * 4_759
             + channel            * 389
         )
-        return random.Random(mix).gauss(0.0, scale)
+        # Using a fresh RandomState for stable, per-symbol noise
+        return float(np.random.RandomState(mix % (2**32)).normal(0.0, scale))
 
     def _record_action_memory(self, action: CrisisAction) -> None:
         name = action.action_type.value if hasattr(action.action_type, "value") else str(action.action_type)
