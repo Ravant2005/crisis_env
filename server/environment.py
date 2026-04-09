@@ -1318,6 +1318,8 @@ class CrisisEnvironment:
     def _spawn_secondary_threat(self, parent: ThreatInfo) -> ThreatInfo:
         next_id      = max(t.threat_id for t in self._threats) + 1
         cascade_type = self._np_rng.choice([ThreatType.FIRE, ThreatType.EXPLOSION, ThreatType.DRONE_THREAT])
+        if isinstance(cascade_type, ThreatType):
+            cascade_type = cascade_type.value
 
         parent_truth = self._true_state[parent.threat_id]
         severity     = round(_clamp(parent_truth["severity"] * self._np_rng.uniform(0.48, 0.72), 2.5, 8.8), 2)
