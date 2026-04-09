@@ -169,9 +169,7 @@ class CrisisEnvironment:
     def __init__(self, seed: Optional[int] = None):
         self._seed = seed if seed is not None else 42
         self._rng  = random.Random(self._seed)
-        random.seed(self._seed)
-        import numpy as np
-        np.random.seed(self._seed)
+        self._np_rng = np.random.RandomState(self._seed)
 
         self._difficulty          = "medium"
         self._profile             = DIFFICULTY_PROFILES[self._difficulty]
@@ -205,12 +203,14 @@ class CrisisEnvironment:
         self._coord_scores:    List[float]       = []
         self._rescue_total_victims = 0
         self._rescue_saved         = 0
+        self._rescue_streak        = 0
         self._rescue_steps:    List[int]         = []
 
         self._wrong_priority_events  = 0
         self._critical_ignored_steps = 0
 
         self._coordinated = False
+        self._last_coord_step: int = -999
         self._classified: set = set()
         self._predicted:  set = set()
         self._allocated:  set = set()
@@ -233,9 +233,7 @@ class CrisisEnvironment:
         if self._seed is None:
             self._seed = 42
         self._rng = random.Random(self._seed)
-        random.seed(self._seed)
-        import numpy as np
-        np.random.seed(self._seed)
+        self._np_rng = np.random.RandomState(self._seed)
 
         self._difficulty          = difficulty if difficulty in DIFFICULTY_PROFILES else "medium"
         self._profile             = DIFFICULTY_PROFILES[self._difficulty]
@@ -720,8 +718,9 @@ class CrisisEnvironment:
         }
 
     def _handle_coordinate(self, payload: CoordinationPayload) -> Tuple[float, List[str], Dict[str, float]]:
-        if self._coordinated:
-            return -0.05, ["Redundant coordination"], {}
+        steps_since_last = self._step_count - self._last_coord_step
+        if self._coordinated and steps_since_last < 3:
+            return -0.05, ["Redundant coordination (too soon)"], {}
             
         # BUG FIX 5: Coordinate works on all ever-seen threats, not just currently active ones.
         # Original required ≥2 *currently* active threats, which often blocked coordination
@@ -761,6 +760,7 @@ class CrisisEnvironment:
 
         bonus = score * 0.05
         self._coordinated = True
+        self._last_coord_step = self._step_count
         return bonus, [f"[COORDINATE] priority={order} | score={score:.3f}"], {
             "wrong_priority_penalty": wrong_priority_penalty
         }

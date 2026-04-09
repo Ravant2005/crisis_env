@@ -31,7 +31,7 @@ from openai import OpenAI
 API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME   = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
-ENV_URL      = os.getenv("ENV_URL", "https://praveen4278-crisis-ai-env.hf.space").rstrip("/")
+ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860").rstrip("/")
 BENCHMARK    = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
 SEED         = int(os.getenv("SEED", "42"))
 
@@ -279,13 +279,13 @@ async def run_task(client: OpenAI, task_id: str) -> float:
             if done or step % 5 == 0:
                 try:
                     scores_resp = await env_scores()
-                    s = float(
-                        scores_resp.get("final_score")
-                        or scores_resp.get("final")
-                        or 0.0
-                    )
-                    if s > 0.0:
-                        score = s
+                    final_score_val = scores_resp.get("final_score")
+                    final_val = scores_resp.get("final")
+                    
+                    if final_score_val is not None and float(final_score_val) > 0:
+                        score = float(final_score_val)
+                    elif final_val is not None and float(final_val) > 0:
+                        score = float(final_val)
                 except Exception:
                     pass
 
@@ -295,21 +295,22 @@ async def run_task(client: OpenAI, task_id: str) -> float:
         # Final score fetch
         try:
             scores_resp = await env_scores()
-            final = float(
-                scores_resp.get("final_score")
-                or scores_resp.get("final")
-                or 0.0
+            final_score_val = scores_resp.get("final_score")
+            final_val = scores_resp.get("final")
+            computed = (
+                0.20 * float(scores_resp.get("classification", 0.0)) + 
+                0.20 * float(scores_resp.get("prediction",     0.0)) + 
+                0.20 * float(scores_resp.get("allocation",     0.0)) + 
+                0.15 * float(scores_resp.get("coordination",   0.0)) + 
+                0.25 * float(scores_resp.get("rescue",         0.0))
             )
-            if final == 0.0:
-                final = (
-                    0.20 * float(scores_resp.get("classification", 0.0)) +
-                    0.20 * float(scores_resp.get("prediction",     0.0)) +
-                    0.20 * float(scores_resp.get("allocation",     0.0)) +
-                    0.15 * float(scores_resp.get("coordination",   0.0)) +
-                    0.25 * float(scores_resp.get("rescue",         0.0))
-                )
-            if final > 0.0:
-                score = final
+            
+            if final_score_val is not None and float(final_score_val) > 0:
+                score = float(final_score_val)
+            elif final_val is not None and float(final_val) > 0:
+                score = float(final_val)
+            elif computed > 0:
+                score = computed
         except Exception:
             pass
 
