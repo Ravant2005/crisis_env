@@ -48,11 +48,10 @@ _TASK_TO_DIFF: Dict[str, str] = {
 class ResetRequest(BaseModel):
     """
     All fields are optional so the platform can POST with no body (null).
-    Accepts BOTH task_id (e.g. "task_easy") AND difficulty (e.g. "easy") —
+    Accepts task_id (e.g. "task_easy") —
     whichever the caller provides.
     """
     task_id:    Optional[str] = None   # "task_easy" | "task_medium" | "task_hard"
-    difficulty: Optional[str] = None   # "easy" | "medium" | "hard"
     seed:       Optional[int] = None
 
 
@@ -120,23 +119,19 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
     if req is None:
         req = ResetRequest()
 
-    task_id    = req.task_id
-    seed       = req.seed
-    difficulty = req.difficulty
-
-    # If caller sent difficulty but not task_id, derive task_id
-    if task_id is None and difficulty is not None:
-        task_id = _DIFF_TO_TASK.get(difficulty.lower(), "task_easy")
-
-    # Final fallback
-    if task_id is None:
-        task_id = "task_easy"
+    task_id = req.task_id or "task_easy"
+    seed    = req.seed
 
     result = env.reset(task_id=task_id, seed=seed)
 
+    # Ensure task_id is returned in info for platform validator
+    if "info" not in result:
+        result["info"] = {}
+    result["info"]["task_id"] = task_id
+
     return {
         "observation": result["observation"],
-        "info": result.get("info", {})
+        "info": result["info"]
     }
 
 
