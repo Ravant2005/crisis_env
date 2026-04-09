@@ -1,3 +1,12 @@
+---
+title: CrisisAI OpenEnv
+emoji: 🚨
+colorFrom: red
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # 🚨 CrisisAI — AI Crisis Response & Rescue Coordination
 
 > **OpenEnv RL Environment** | Multi-threat national emergency management with partial observability, stochastic dynamics, and five interlinked decision tasks grounded in real operational doctrine.
