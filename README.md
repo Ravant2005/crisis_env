@@ -43,7 +43,7 @@ Thousands of lives saved.
 
 CrisisAI is a step toward a future where AI doesn’t just process data—
 It helps protect humanity when it matters the most.
-Modern conflicts and disasters demand simultaneous, time-critical decisions across threat identification, casualty projection, resource deployment, inter-agency coordination, and survivor rescue — all under uncertainty and resource constraints. No existing RL benchmark captures this full pipeline in a single environment.
+
 
 **CrisisAI** models a concrete, high-stakes scenario: multi-region crisis simulation —
 
