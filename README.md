@@ -15,6 +15,34 @@ pinned: false
 
 ## 🌍 Motivation & Real-World Utility
 
+The world is not as stable as it seems.
+Across the globe, nations live under the constant shadow of conflict. Airstrikes, naval aggression, and drone warfare are no longer rare events—they are real, ongoing threats that can escalate within minutes. And when they do, it is not governments or strategies that suffer first…
+It is people.
+
+Families in cities. Workers in business districts. Innocent lives caught in moments they never chose.
+In such situations, decisions must be made instantly:
+Which threat is most critical?
+Where will the impact be the greatest?
+how to handle multiple threats simultaneously?
+How do we deploy limited resources to save the maximum number of lives?
+How many units and types of units required for the rescue operation?
+
+These are not theoretical questions. They are the kind of decisions that define survival during modern conflict.
+CrisisAI is built to simulate exactly these moments.
+It places AI in a high-pressure environment where multiple coordinated threats occur simultaneously across regions—forcing it to analyze, prioritize, and act under extreme uncertainty and time pressure. Not for strategic advantage, but for something far more important:
+To minimize human loss.
+This environment is not about war.
+It is about responding to war responsibly.
+It is about building systems that can assist in:
+Early threat identification
+Rapid civilian risk assessment
+Smarter allocation of defense and rescue resources
+Coordinated response across multiple regions
+Because in real conflict scenarios, even a small improvement in decision-making can mean:
+Thousands of lives saved.
+
+CrisisAI is a step toward a future where AI doesn’t just process data—
+It helps protect humanity when it matters the most.
 Modern conflicts and disasters demand simultaneous, time-critical decisions across threat identification, casualty projection, resource deployment, inter-agency coordination, and survivor rescue — all under uncertainty and resource constraints. No existing RL benchmark captures this full pipeline in a single environment.
 
 **CrisisAI** models a concrete, high-stakes scenario: multi-region crisis simulation —
