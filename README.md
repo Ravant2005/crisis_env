@@ -14,6 +14,15 @@ tags:
 
 ---
 
+## Crisis Simulation Scene:
+---
+<p align="center">
+ <img src="assets/crisis.png" width="700"/>
+ <br/>
+ <em>Figure 1: Crisis-City under attack</em>
+</p>
+---
+
 ## 🌍 Motivation & Real-World Utility
 
 The world is not as stable as it seems.
@@ -62,6 +71,14 @@ An agent must classify each threat, predict its impact, allocate the right defen
 - AI safety researchers studying goal prioritization under competing constraints and scarcity
 
 ---
+
+## System Architecture Diagram:
+
+<p align="center">
+<img src="assets/system_architecture.png" width="700"/>
+<br/>
+<em>Figure 1: Crisis_env-system architecture diagram</em>
+</p>
 
 ## 🏗️ Environment Overview
 
@@ -200,14 +217,33 @@ One `CrisisAction` submitted per step. Seven action types:
 - **Deterministic** — same seed → identical scores verified by `test_determinism.py` (3 independent runs)
 - **Dual-mode** — accepts a live `env` object OR a flat `actions` list for offline platform validation
 - **Varied** — grader smoke test confirms scores differ meaningfully across action quality levels
-
+ 
 ### Step Reward Signal (dense, not sparse)
 ```
-reward = 3.0 × Σ(weight_i × Δtask_score_i) + action_handler_bonus − time_cost
-```
-Per-task shaped components: Gaussian-based classification accuracy, log-ratio prediction error, zone-affinity allocation quality, rank-correlation coordination score, victim-ratio rescue efficiency. Skip returns −0.12 (strong penalty to break no-op loops). Terminal bonus = 0.10 × final\_score.
+The per-step reward blends environment task-score deltas with action-specific shaped rewards:
+r_t = 3.0 × Σᵢ(wᵢ × Δscore_i) + handler_bonus − time_cost
 
----
+**Per-task shaped components:**
+
+| Task | Shape Function | Peak Signal |
+|------|----------------|-------------|
+| T1 Classify | Gaussian on severity error (σ=1.5), type match bonus | 0.55 (exact) |
+| T2 Predict | 0.5×Gauss(TTI, σ=0.15) + 0.5×Gauss(log-pop-ratio, σ=0.5) | 0.83 |
+| T3 Allocate | Effectiveness + zone-affinity bonus (0.2) − waste penalty | 0.58 |
+| T4 Coordinate | Weighted rank-correlation vs true priority order | 0.05×score |
+| T5 Rescue | saved_victims/total × 0.60 + speed × 0.01 + streak | 0.90 |
+
+**Penalty signals:** `skip` → −0.12 (breaks no-op loops). Invalid action → −0.15. Redundant coordinate < 3 steps → −0.05. Budget exhausted rescue attempt → −0.04.
+
+**Terminal bonus:** `+0.10 × final_score` on episode completion.
+```
+## Performance Comparison Chart:
+
+<p align="center">
+<img src="assets/performance_comparison.png" width="700"/>
+<br/>
+<em>Figure 1: Crisis-performance comparison chart</em>
+</p>
 
 ## 🛠️ Setup & Usage
 
