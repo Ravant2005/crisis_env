@@ -5,6 +5,14 @@ description: >
   3 difficulty tasks covering threat classification, impact prediction,
   and full crisis response.
 
+metadata:
+  author: "Ravant Vignesh"
+  category: "crisis-response"
+  tags:
+    - openenv
+    - reinforcement-learning
+    - disaster-management
+
 environment:
   type: openenv
   base_url: https://praveen4278-crisis-ai-env.hf.space
@@ -27,21 +35,33 @@ endpoints:
     method: GET
     path: /health
 
+spaces:
+  observation:
+    type: CrisisObservation
+    description: Observed crisis alerts with uncertainty and system state
+
+  action:
+    type: CrisisAction
+    description: Agent actions such as classify, predict, allocate, coordinate, and rescue
+
 tasks:
   - id: task_easy
     name: Threat Classification
     difficulty: easy
     description: Classify incoming threats by type and severity.
+    grader: grade_task_easy
     grader_range: [0.0, 1.0]
 
   - id: task_medium
     name: Impact Prediction
     difficulty: medium
     description: Predict time-to-impact and population-at-risk for each threat.
+    grader: grade_task_medium
     grader_range: [0.0, 1.0]
 
   - id: task_hard
     name: Full Crisis Response
     difficulty: hard
     description: Allocate resources, coordinate priorities, and execute rescue operations.
+    grader: grade_task_hard
     grader_range: [0.0, 1.0]

@@ -235,7 +235,7 @@ docker run -p 7860:7860 crisis-env
 ### Validate (OpenEnv Compliance — 18 checks)
 ```bash
 python validate_env.py
-# Expected: 18/18 PASS — STATUS: READY TO SUBMIT
+# Expected: 26/26 PASS — STATUS: READY TO SUBMIT
 ```
 
 ### Run Inference (LLM Agent)

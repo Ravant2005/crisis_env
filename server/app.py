@@ -22,7 +22,13 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-env = CrisisEnvEnvironment()
+from typing import Dict as _Dict
+_sessions: _Dict[str, CrisisEnvEnvironment] = {}
+
+def _get_session(session_id: str) -> CrisisEnvEnvironment:
+    if session_id not in _sessions:
+        _sessions[session_id] = CrisisEnvEnvironment()
+    return _sessions[session_id]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Difficulty ↔ task_id mapping (used in both directions)
@@ -53,10 +59,12 @@ class ResetRequest(BaseModel):
     """
     task_id:    Optional[str] = None   # "task_easy" | "task_medium" | "task_hard"
     seed:       Optional[int] = None
+    session_id: Optional[str] = "default"
 
 
 class StepRequest(BaseModel):
-    action: Dict[str, Any]
+    action:     Dict[str, Any]
+    session_id: Optional[str] = "default"
 
 
 class StepResult(BaseModel):
@@ -119,9 +127,11 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
     if req is None:
         req = ResetRequest()
 
-    task_id = req.task_id or "task_easy"
-    seed    = req.seed
+    task_id    = req.task_id or "task_easy"
+    seed       = req.seed
+    session_id = getattr(req, "session_id", "default") or "default"
 
+    env = _get_session(session_id)
     result = env.reset(task_id=task_id, seed=seed)
 
     # Ensure task_id is returned in info for platform validator
@@ -138,6 +148,8 @@ def reset(req: Optional[ResetRequest] = Body(default=None)) -> Dict[str, Any]:
 @app.post("/step", tags=["OpenEnv"], response_model=StepResult)
 def step(req: StepRequest) -> StepResult:
     """Submit one action. Returns observation, reward, done, info."""
+    session_id = getattr(req, "session_id", "default") or "default"
+    env = _get_session(session_id)
     try:
         result = env.step(req.action)
         return {
@@ -171,19 +183,21 @@ def step(req: StepRequest) -> StepResult:
 
 
 @app.get("/state", tags=["OpenEnv"])
-def state() -> Dict[str, Any]:
+def state(session_id: str = "default") -> Dict[str, Any]:
     """Return the full internal CrisisState as a flat dict."""
+    env = _get_session(session_id)
     return env.get_full_state()
 
 
 @app.get("/scores", tags=["OpenEnv"])
-def get_scores():
+def get_scores(session_id: str = "default"):
     """
     Returns all task scores + final score.
     Required for OpenEnv validation + inference script.
     
     CRITICAL: All scores must be STRICTLY between 0 and 1 (not 0.0, not 1.0)
     """
+    env = _get_session(session_id)
     try:
         scores = env.task_scores()
         

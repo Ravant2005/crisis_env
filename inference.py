@@ -106,6 +106,13 @@ async def env_scores() -> Dict:
         headers=_headers(), timeout=30,
     ).json())
 
+async def env_state() -> Dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: requests.get(
+        f"{ENV_URL}/state",
+        headers=_headers(), timeout=30,
+    ).json())
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -251,6 +258,48 @@ def best_env_alloc_resource(threat: Dict, resources: List[Dict]) -> Optional[Dic
     if affinity:
         return max(affinity, key=eff)
     return max(resources, key=eff)
+
+
+# ─────────────────────────────────────────────
+# LLM + AGENT FUSION
+# ─────────────────────────────────────────────
+_VALID_ACTION_TYPES = {"classify", "predict", "allocate", "coordinate", "rescue", "skip", "delay"}
+_REQUIRED_PAYLOADS = {
+    "classify":   "classification",
+    "predict":    "prediction",
+    "allocate":   "allocation",
+    "coordinate": "coordination",
+    "rescue":     "rescue",
+    "delay":      "delay",
+}
+
+def _llm_action_is_structurally_valid(action: Dict) -> bool:
+    """Return True if the LLM action has correct top-level structure."""
+    if not isinstance(action, dict):
+        return False
+    at = action.get("action_type", "")
+    if at not in _VALID_ACTION_TYPES:
+        return False
+    required_key = _REQUIRED_PAYLOADS.get(at)
+    if required_key and not isinstance(action.get(required_key), dict):
+        return False
+    return True
+
+def _merge_llm_with_agent(
+    llm_action: Optional[Dict],
+    agent: "OptimalAgent",
+    obs: Dict,
+    step: int,
+) -> Dict:
+    """
+    Use LLM action when structurally valid AND action_type is allowed by mask.
+    Fall back to OptimalAgent otherwise.
+    """
+    if llm_action is not None and _llm_action_is_structurally_valid(llm_action):
+        at = llm_action.get("action_type", "skip")
+        if _action_is_valid(obs, at):
+            return llm_action
+    return agent.get_action(obs, step)
 
 
 # ─────────────────────────────────────────────
@@ -456,28 +505,20 @@ class OptimalAgent:
 
         # ── RESCUE PHASE (ONLY IF NO UNALLOCATED THREATS) ────────────────
         any_unallocated = any(int(t["threat_id"]) not in self.allocated_ids for t in active_t)
-        if not any_unallocated and active_z and budget > 0 and self.consecutive_neg_rescue < 2:
+        if not any_unallocated and active_z and budget > 0 and self.consecutive_neg_rescue < 3:
             active_z_sorted = sorted(active_z, key=zone_remaining, reverse=True)
-            # If we had negative rewards, try the next best zone
             if self.consecutive_neg_rescue >= 1 and len(active_z_sorted) > 1:
                 for z in active_z_sorted[1:]:
                     if zone_remaining(z) > 3:
-                        units = self._optimal_units(zone_remaining(z), budget)
+                        units = self._aggressive_units(zone_remaining(z), budget)
                         self.consecutive_neg_rescue = 0
                         return self._rescue_action(z, units)
             best_z = active_z_sorted[0]
             remaining = zone_remaining(best_z)
-            # Respect max rescue units to avoid waste penalties
             max_units = max(1, min(_max_rescue_units(obs) or 5, budget))
-            # Choose units to keep rescue efficiency high (env uses rescued/(deployed*10)).
-            # Approx save per unit per step ~ 14 * zone_multiplier * eff, where eff ∈ [0.45, 1.15].
-            # We target ~10 victims/unit to keep efficiency near 1.0.
-            target_per_unit = 10
-            est_units = int(np.ceil(max(1.0, remaining / max(target_per_unit, 1))))
-            units = min(max(1, min(est_units, self._optimal_units(remaining, budget))), max_units)
-            if units > 0:
-                if _action_is_valid(obs, "rescue"):
-                    return self._rescue_action(best_z, units)
+            units = min(self._aggressive_units(remaining, budget), max_units)
+            if units > 0 and _action_is_valid(obs, "rescue"):
+                return self._rescue_action(best_z, units)
 
         # ── HANDLE NEWLY SPAWNED THREATS ────────────────────────────────
         new_unclassified = [t for t in active_t if int(t["threat_id"]) not in self.classified_ids]
@@ -517,10 +558,17 @@ class OptimalAgent:
             return min(2, budget)
         if remaining_victims <= 25:
             return min(3, budget)
-        # Clear large zones quickly
         units = (remaining_victims // 7) + 1
         units = max(1, min(5, units, budget))
         return units
+
+    def _aggressive_units(self, remaining_victims: int, budget: int) -> int:
+        """Send enough units to rescue ~30% of remaining victims per step. 
+        env saves ~14 victims/unit; target efficiency >= 0.90.""" 
+        if remaining_victims <= 0:
+            return 0
+        target = max(1, int(np.ceil(remaining_victims * 0.30 / 14)))
+        return max(1, min(target, 5, budget))
 
 
 # ─────────────────────────────────────────────
@@ -584,9 +632,9 @@ async def run_task(client: OpenAI, task_id: str) -> float:
             if done:
                 break
 
-            _ = try_llm_action(client, obs, step, task_id)
+            llm_action = try_llm_action(client, obs, step, task_id)
+            action = _merge_llm_with_agent(llm_action, agent, obs, step)
 
-            action = agent.get_action(obs, step)
             step_result = await env_step(action)
 
             reward = float(step_result.get("reward", 0.0))
