@@ -151,9 +151,9 @@ All five sub-tasks are active in every episode. The three registered tasks expos
 
 | Task ID | Name | Difficulty | Active Threats | Episode Steps | Expected Score |
 |---------|------|------------|----------------|---------------|---------------|
-| `task_easy` | Threat Classification | Easy | 2 | 22 | ~0.70 |
-| `task_medium` | Impact Prediction | Medium | 3 | 26 | ~0.55 |
-| `task_hard` | Full Crisis Response | Hard | 4 | 30 | ~0.35 |
+| `task_easy` | Threat Classification | Easy | 2 | 22 | ~0.90 |
+| `task_medium` | Impact Prediction | Medium | 3 | 26 | ~0.83 |
+| `task_hard` | Full Crisis Response | Hard | 4 | 30 | ~0.76 |
 
 ---
 
