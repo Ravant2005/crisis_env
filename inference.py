@@ -18,12 +18,15 @@ from typing import List, Optional, Dict, Any, Set, Tuple
 from openai import OpenAI
 import numpy as np
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME   = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-7B-Instruct"
+API_KEY      = os.getenv("HF_TOKEN") 
+API_BASE_URL = os.getenv("API_BASE_URL") 
+MODEL_NAME   = os.getenv("MODEL_NAME") 
 ENV_URL      = os.getenv("ENV_URL", "http://localhost:7860").rstrip("/")
 BENCHMARK    = os.getenv("MY_ENV_V4_BENCHMARK", "openenv")
 SEED         = int(os.getenv("SEED", "42"))
