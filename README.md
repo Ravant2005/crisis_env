@@ -241,7 +241,7 @@ python validate_env.py
 ### Run Inference (LLM Agent)
 ```bash
 export HF_TOKEN=your_token
-export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
+export MODEL_NAME=meta-llama/Meta-Llama-3-8B-Instruct
 python inference.py
 # Runs task_easy → task_medium → task_hard
 # Prints [START] / [STEP]* / [END] logs per OpenEnv spec
