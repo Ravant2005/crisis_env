@@ -4,7 +4,8 @@ emoji: 🚨
 colorFrom: red
 colorTo: blue
 sdk: docker
-pinned: false
+tags:
+  - openenv
 ---
 
 # 🚨 CrisisAI — AI Crisis Response & Rescue Coordination
